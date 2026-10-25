@@ -132,6 +132,11 @@ on:
         required: false
         type: boolean
         default: false
+      use_prop_spoof:
+        description: "集成 prop_spoof 属性伪装（内建，参数由配套模块注入）"
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   validate-custom-kmi:
@@ -176,4 +181,5 @@ jobs:
       droidspaces: ${{ inputs.droidspaces || 'off' }}
       droidspaces_ntsync: ${{ inputs.droidspaces_ntsync || false }}
       use_nomount: ${{ inputs.use_nomount || false }}
+      use_prop_spoof: ${{ inputs.use_prop_spoof || false }}
       build_bypass: ${{ inputs.build_bypass || false }}

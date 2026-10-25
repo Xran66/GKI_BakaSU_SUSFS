@@ -94,6 +94,11 @@ on:
         required: false
         type: boolean
         default: false
+      use_prop_spoof:
+        description: "集成 prop_spoof 属性伪装（内建，参数由配套模块注入）"
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   build-kernel:
@@ -901,6 +906,29 @@ jobs:
               fi
             fi
           fi
+
+      # ==================== 集成 prop_spoof 属性伪装（内建） ====================
+      # 把 prop_spoof.c 编进 vmlinux（obj-y），不在 /proc/modules 留模块痕迹。
+      # 参数不走 insmod：内核只在 device_initcall 建 /proc/prop_spoof(_cfg)，
+      # 由配套 KSU 模块在开机脚本里写 fakedir/uids/build/start 驱动激活。
+      - name: 集成 prop_spoof 内建模块
+        if: ${{ inputs.use_prop_spoof }}
+        working-directory: ${{ env.KERNEL_ROOT }}
+        run: |
+          set -euo pipefail
+          echo "集成 prop_spoof（内建进 vmlinux）..."
+          DST=./common/drivers/prop_spoof
+          mkdir -p "$DST"
+          cp "$GITHUB_WORKSPACE/prop_spoof/prop_spoof.c" "$DST/"
+
+          printf '%s\n' 'ccflags-y += -DPROP_SPOOF_BUILTIN' 'obj-y += prop_spoof.o' > "$DST/Makefile"
+          cp "$DST/Makefile" "$DST/Kbuild"
+
+          if ! grep -q 'prop_spoof' ./common/drivers/Makefile; then
+            echo 'obj-y += prop_spoof/' >> ./common/drivers/Makefile
+          fi
+          echo "--- drivers/Makefile 尾部 ---"
+          tail -3 ./common/drivers/Makefile
 
       - name: 克隆 Droidspaces 补丁仓库
         if: inputs.clean_build != true && inputs.droidspaces != 'off'
