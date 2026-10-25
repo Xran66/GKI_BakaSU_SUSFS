@@ -137,6 +137,11 @@ on:
         required: false
         type: boolean
         default: false
+      use_unicode_bypass:
+        description: "应用 Unicode 绕过修复（默认关闭）"
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   validate-custom-kmi:
@@ -182,4 +187,5 @@ jobs:
       droidspaces_ntsync: ${{ inputs.droidspaces_ntsync || false }}
       use_nomount: ${{ inputs.use_nomount || false }}
       use_prop_spoof: ${{ inputs.use_prop_spoof || false }}
+      use_unicode_bypass: ${{ inputs.use_unicode_bypass || false }}
       build_bypass: ${{ inputs.build_bypass || false }}
