@@ -372,6 +372,7 @@ static char *build_reals;
 static char *build_fakes;
 
 static char cfg_fake_dir[256] = "/dev/propspoof";
+static char cfg_sys_dir[256];
 static char cfg_uids[512];
 static char cfg_reals[2048];
 static char cfg_fakes[2048];
@@ -424,6 +425,10 @@ static ssize_t cfg_write(struct file *f, const char __user *ub, size_t n,
 			target_uids = cfg_uids;
 			parse_target_uids();
 			pr_info("prop_spoof: cfg uids=%s\n", target_uids);
+		} else if (!strncmp(line, "sysdir ", 7)) {
+			strscpy(cfg_sys_dir, line + 7, sizeof(cfg_sys_dir));
+			sys_fake_dir = cfg_sys_dir;
+			pr_info("prop_spoof: cfg sysdir=%s\n", sys_fake_dir);
 		} else if (!strncmp(line, "build ", 6)) {
 			char *sep = strchr(line + 6, '|');
 			if (sep) {
