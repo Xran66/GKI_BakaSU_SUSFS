@@ -239,7 +239,13 @@ static filp_open_fn filp_open_p;
 /* ==================================================================
  * /proc/cpuinfo：PDE->proc_ops 堆指针按 uid 过滤（v1 验证过的方案）
  * ================================================================== */
+#ifdef PROP_SPOOF_BUILTIN
+/* 内建：直接用内核树里的真实私有头，避免手抄结构体与内核对不上版本
+ * （源码位于 common/drivers/prop_spoof/，../../ = common/） */
+#include "../../fs/proc/internal.h"
+#else
 #include "pde_def.h"
+#endif
 
 static struct proc_dir_entry *cpuinfo_pde;
 static const struct proc_ops *orig_ops_ptr;
