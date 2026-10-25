@@ -234,7 +234,6 @@ module_param(shh_addr, ulong, 0);
 module_param(filp_open_addr, ulong, 0);
 
 typedef struct file *(*filp_open_fn)(const char *, int, umode_t);
-static filp_open_fn filp_open_p;
 
 /* ==================================================================
  * /proc/cpuinfo：PDE->proc_ops 堆指针按 uid 过滤（v1 验证过的方案）
@@ -824,7 +823,7 @@ static int build_patch_one(unsigned long data_addr, int p, int is_u16)
 {
 	unsigned long cands[2];
 	u32 c, newcnt;
-	int ci, cnt_off = 0, flen_written;
+	int ci, cnt_off = 0;
 	bool have = false;
 	int rl = br_len[p], fl = bf_len[p];
 	int fmt = 0;   /* 0=新格式(8bit,len=2n) 1=旧压缩 2=旧UTF-16 */
@@ -853,8 +852,8 @@ static int build_patch_one(unsigned long data_addr, int p, int is_u16)
 		if (dbg_reject < 6) {
 			u32 d4 = 0, d8 = 0;
 
-			copy_from_user(&d4, (void __user *)(data_addr - 4), 4);
-			copy_from_user(&d8, (void __user *)(data_addr - 8), 4);
+			(void)copy_from_user(&d4, (void __user *)(data_addr - 4), 4);
+			(void)copy_from_user(&d8, (void __user *)(data_addr - 8), 4);
 			pr_info("prop_spoof: dbg bhit p=%d c4=%08x c8=%08x u16=%d\n",
 				p, d4, d8, is_u16);
 			dbg_reject++;
@@ -867,10 +866,8 @@ static int build_patch_one(unsigned long data_addr, int p, int is_u16)
 
 	if (fmt == 0) {
 		newcnt = (u32)(2 * fl);
-		flen_written = fl;
 	} else {
 		newcnt = (u32)fl | (fmt == 1 ? 0x80000000u : 0);
-		flen_written = fl;
 	}
 	if (copy_to_user((void __user *)(data_addr - cnt_off), &newcnt, 4))
 		return -EFAULT;
@@ -1071,7 +1068,6 @@ static int lsm_task_fix_setuid(struct cred *new, const struct cred *old,
 	return 0;
 }
 
-static loff_t prop_dir_pos;
 
 static bool prop_filldir(struct dir_context *ctx, const char *name, int namelen,
 			 loff_t offset, u64 ino, unsigned d_type)
@@ -1389,7 +1385,7 @@ static int lsm_install(void)
 		}
 	} else {
 		/* 空链表：写 head->first */
-		prop_lsm_hook.list.pprev = (struct hlist_node *)&head->first;
+		prop_lsm_hook.list.pprev = (struct hlist_node **)&head->first;
 		if (write_u64_via_alias((unsigned long)&head->first,
 					(unsigned long)&prop_lsm_hook.list)) {
 			pr_err("prop_spoof: 别名写入失败（挂载空表）\n");
@@ -1420,7 +1416,7 @@ static int lsm_install(void)
 			}
 		} else {
 			prop_lsm_hook_open.list.pprev =
-				(struct hlist_node *)&ohead->first;
+				(struct hlist_node **)&ohead->first;
 			if (write_u64_via_alias((unsigned long)&ohead->first,
 					(unsigned long)&prop_lsm_hook_open.list)) {
 				pr_err("prop_spoof: file_open 钩子挂载失败(空表)\n");
@@ -1464,7 +1460,7 @@ static void lsm_remove(void)
 		write_u64_via_alias((unsigned long)&prop_lsm_hook.list.next->pprev,
 				    (unsigned long)(prev ?
 					&prev->next :
-					(struct hlist_node *)&head->first));
+					(struct hlist_node **)&head->first));
 
 	/* 摘除 file_open 钩子 */
 	{
@@ -1487,7 +1483,7 @@ static void lsm_remove(void)
 				write_u64_via_alias(
 					(unsigned long)&prop_lsm_hook_open.list.next->pprev,
 					(unsigned long)(op ? &op->next :
-						(struct hlist_node *)&ohead->first));
+						(struct hlist_node **)&ohead->first));
 		}
 	}
 	synchronize_rcu();
@@ -1497,7 +1493,9 @@ static void lsm_remove(void)
 
 static int __init prop_spoof_init(void)
 {
+#ifndef PROP_SPOOF_BUILTIN
 	int ret;
+#endif
 
 #ifdef PROP_SPOOF_BUILTIN
 	/* 内建：initcall 早于用户态，假属性区还没生成。
