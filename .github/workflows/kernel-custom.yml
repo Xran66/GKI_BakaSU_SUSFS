@@ -82,49 +82,9 @@ on:
         required: true
         type: boolean
         default: false
-      use_bbg:
-        description: "启用 BBG 防格机"
-        required: true
-        type: boolean
-        default: false
-      use_rekernel:
-        description: "启用 Re-Kernel 驱动"
-        required: false
-        type: boolean
-        default: false
-      cve_2026_43499_patch:
-        description: "应用 CVE-2026-43499 rtmutex 修复链"
-        required: false
-        type: boolean
-        default: true
       cancel_susfs:
         description: "禁用 SUSFS"
         required: true
-        type: boolean
-        default: false
-      supp_op:
-        description: "启用一加 8E 支持"
-        required: false
-        type: boolean
-        default: false
-      droidspaces:
-        description: "Droidspaces 容器支持 (5.10~6.6: 槽位补丁, 6.12+: 开/关)"
-        required: false
-        type: choice
-        options:
-          - "off"
-          - "678"
-          - "123"
-          - "345"
-        default: "off"
-      droidspaces_ntsync:
-        description: "启用 Droidspaces 容器 NTSync 支持（需启用 Droidspaces）"
-        required: false
-        type: boolean
-        default: false
-      build_bypass:
-        description: "同时构建普通内核和 Bypass 内核"
-        required: false
         type: boolean
         default: false
       use_nomount:
@@ -134,11 +94,6 @@ on:
         default: false
       use_prop_spoof:
         description: "集成 prop_spoof 属性伪装（内建，参数由配套模块注入）"
-        required: false
-        type: boolean
-        default: false
-      use_unicode_bypass:
-        description: "应用 Unicode 绕过修复（默认关闭）"
         required: false
         type: boolean
         default: false
@@ -178,14 +133,6 @@ jobs:
       version: ${{ inputs.version || '' }}
       build_time: ${{ inputs.build_time || '' }}
       use_zram: ${{ inputs.use_zram }}
-      use_bbg: ${{ inputs.use_bbg }}
-      use_rekernel: ${{ inputs.use_rekernel || false }}
-      cve_2026_43499_patch: ${{ inputs.cve_2026_43499_patch }}
-      supp_op: ${{ inputs.supp_op || false }}
       enable_susfs: ${{ !inputs.cancel_susfs }}
-      droidspaces: ${{ inputs.droidspaces || 'off' }}
-      droidspaces_ntsync: ${{ inputs.droidspaces_ntsync || false }}
       use_nomount: ${{ inputs.use_nomount || false }}
       use_prop_spoof: ${{ inputs.use_prop_spoof || false }}
-      use_unicode_bypass: ${{ inputs.use_unicode_bypass || false }}
-      build_bypass: ${{ inputs.build_bypass || false }}

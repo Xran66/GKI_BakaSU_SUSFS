@@ -60,36 +60,9 @@ on:
       use_zram:
         required: true
         type: boolean
-      use_bbg:
-        required: true
-        type: boolean
-      use_rekernel:
-        required: false
-        type: boolean
-        default: false
-      cve_2026_43499_patch:
-        required: false
-        type: boolean
-        default: true
       enable_susfs:
         required: true
         type: boolean
-      supp_op:
-        required: false
-        type: boolean
-        default: false
-      droidspaces:
-        required: false
-        type: string
-        default: "off"
-      droidspaces_ntsync:
-        required: false
-        type: boolean
-        default: false
-      build_bypass:
-        required: false
-        type: boolean
-        default: false
       use_nomount:
         required: false
         type: boolean
@@ -99,18 +72,12 @@ on:
         required: false
         type: boolean
         default: false
-      use_unicode_bypass:
-        description: "应用 Unicode 绕过修复（默认关闭）"
-        required: false
-        type: boolean
-        default: false
 
 jobs:
   build-kernel:
     name: "${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.android_version }}-${{ inputs.os_patch_level }}${{ inputs.revision && format('-{0}', inputs.revision) || '' }}-${{ inputs.clean_build && 'Clean' || inputs.ksu_variant }}"
     runs-on: ubuntu-latest
-    # Bypass 模式包含第二次构建，并保留每次构建的超时重试空间。
-    timeout-minutes: ${{ inputs.build_bypass && 180 || 60 }}
+    timeout-minutes: 60
 
     # ==================== 环境变量配置 ====================
     # ccache 配置用于加速重复编译
@@ -136,23 +103,15 @@ jobs:
           if [ "${{ inputs.clean_build }}" = "true" ]; then
             echo "KernelSU      : 禁用"
             echo "KSU 分支      : 不适用"
-            echo "Droidspaces   : off"
           else
             echo "KernelSU      : ${{ inputs.ksu_variant }}"
             echo "KSU 分支      : ${{ inputs.ksu_branch }}"
-            echo "Droidspaces   : ${{ inputs.droidspaces }}"
           fi
           echo "构建时间      : ${{ inputs.build_time }}"
           echo "清洁构建      : ${{ inputs.clean_build }}"
           echo "SUSFS 状态    : ${{ inputs.clean_build != true && inputs.enable_susfs && !(inputs.android_version == 'android17' && inputs.kernel_version == '6.18') }}"
           echo "ZRAM 增强     : ${{ inputs.clean_build != true && inputs.use_zram && !(inputs.android_version == 'android17' && inputs.kernel_version == '6.18') }}"
-          echo "BBG 补丁      : ${{ inputs.clean_build != true && inputs.use_bbg }}"
-          echo "Re-Kernel     : ${{ inputs.clean_build != true && inputs.use_rekernel && !(inputs.android_version == 'android17' && inputs.kernel_version == '6.18') }}"
-          echo "CVE-2026-43499: ${{ inputs.clean_build != true && inputs.cve_2026_43499_patch && inputs.kernel_version != '6.18' }}"
-          echo "NTSync        : ${{ inputs.clean_build != true && inputs.droidspaces != 'off' && inputs.droidspaces_ntsync && !(inputs.android_version == 'android17' && inputs.kernel_version == '6.18') }}"
           echo "NoMount       : ${{ inputs.clean_build != true && inputs.use_nomount }}"
-          echo "OnePlus 8E    : ${{ inputs.clean_build != true && inputs.supp_op && !(inputs.android_version == 'android17' && inputs.kernel_version == '6.18') }}"
-          echo "Bypass 构建   : ${{ inputs.build_bypass }}"
           echo "Stock Config  : ${{ inputs.clean_build && '禁用' || '自动检测 config/stock_defconfig' }}"
           echo "========================================"
 
@@ -165,11 +124,7 @@ jobs:
       - name: 报告 6.18 暂未适配的功能
         if: inputs.android_version == 'android17' && inputs.kernel_version == '6.18'
         run: |
-          echo "Android 17 / 6.18 自动跳过：SUSFS、ZRAM/LZ4KD、NTSync、Re-Kernel 和 CVE-2026-43499 补丁链。"
-          if [ "${{ inputs.supp_op }}" = "true" ]; then
-            echo "::warning::Android 17 / 6.18 尚未验证一加 8E 专用补丁，已跳过。"
-          fi
-          echo "Droidspaces 使用上游标记为 6.12-or-above 的 kABI 补丁；BBG 保持启用。"
+          echo "Android 17 / 6.18 自动跳过：SUSFS 与 ZRAM/LZ4KD。"
 
       # ==================== 清理磁盘空间 ====================
       # GitHub Actions 默认磁盘空间有限，需要清理不必要的预装软件
@@ -306,11 +261,6 @@ jobs:
         run: |
           ANYKERNEL_REPO="https://github.com/coolzyd9107/AnyKernel3.git"
           ANYKERNEL_BRANCH="master"
-          if [ "${{ inputs.build_bypass }}" = "true" ]; then
-            # The bypass menu is maintained against WildKernels' GKI 2.0 tree.
-            ANYKERNEL_REPO="https://github.com/WildKernels/AnyKernel3.git"
-            ANYKERNEL_BRANCH="gki-2.0"
-          fi
           SUSFS_BRANCH="gki-${{ inputs.android_version }}-${{ inputs.kernel_version }}"
 
           echo "克隆 AnyKernel3..."
@@ -529,15 +479,6 @@ jobs:
 
       # ==================== 应用 rtmutex CVE 修复链 ====================
       # 以同步后的实际 SUBLEVEL 判断，避免对已包含上游修复的 LTS 重复打补丁
-      - name: 自动应用 CVE-2026-43499 rtmutex 修复链
-        if: inputs.clean_build != true && inputs.cve_2026_43499_patch
-        working-directory: ${{ env.KERNEL_ROOT }}/common
-        run: |
-          bash "$GITHUB_WORKSPACE/security_patch/apply_cve_2026_43499.sh" \
-            "${{ inputs.kernel_version }}" \
-            "$ACTUAL_SUBLEVEL" \
-            "$GITHUB_WORKSPACE/security_patch"
-
       # ==================== 修复 glibc 2.38 兼容性问题 ====================
       # 某些旧版内核在新版 glibc 上编译会出错，需要打补丁
       - name: 修复 glibc 2.38 兼容性
@@ -570,14 +511,6 @@ jobs:
 
       # ==================== 一加 8E 处理器支持 ====================
       # 添加一加 8E 处理器机型的支持补丁
-      - name: 添加一加 8E 处理器支持
-        if: ${{ inputs.clean_build != true && inputs.supp_op && !(inputs.android_version == 'android17' && inputs.kernel_version == '6.18') }}
-        working-directory: ${{ env.KERNEL_ROOT }}/common/drivers
-        run: |
-          echo "下载一加 8E 支持补丁..."
-          curl -LSs "https://github.com/zzh20188/GKI_KernelSU_SUSFS/raw/refs/heads/dev/hmbird_patch.c" -o hmbird_patch.c
-          echo "obj-y += hmbird_patch.o" >> Makefile
-
       # ==================== 确定 KernelSU 分支 ====================
       # BakaSU 支持自定义分支或 commit hash
       - name: 确定 KernelSU 分支
@@ -942,12 +875,6 @@ jobs:
           echo "--- drivers/Makefile 尾部 ---"
           tail -3 ./common/drivers/Makefile
 
-      - name: 克隆 Droidspaces 补丁仓库
-        if: inputs.clean_build != true && inputs.droidspaces != 'off'
-        run: |
-          git clone --depth 1 https://github.com/ravindu644/Droidspaces-OSS.git /tmp/Droidspaces-OSS
-          echo "DROIDSPACES_PATCHES=/tmp/Droidspaces-OSS/Documentation/resources/kernel-patches/GKI" >> $GITHUB_ENV
-
       # ==================== 备份原始 defconfig ====================
       # 用于后续生成 defconfig fragment（bazel trim 兼容）
       - name: 备份原始 defconfig
@@ -969,198 +896,6 @@ jobs:
 
           if ! grep -q '^CONFIG_NOMOUNT=y' "$DEFCONFIG"; then
             echo "CONFIG_NOMOUNT=y" >> "$DEFCONFIG"
-          fi
-
-      - name: 集成 Droidspaces 支持
-        if: inputs.clean_build != true && inputs.droidspaces != 'off'
-        working-directory: ${{ env.KERNEL_ROOT }}/common
-        run: |
-          KERNEL_VER="${{ inputs.kernel_version }}"
-          SLOT="${{ inputs.droidspaces }}"
-
-          # 678 -> 6_7_8, 123 -> 1_2_3, 345 -> 3_4_5
-          SLOT_NAME=$(echo "$SLOT" | sed 's/\(.\)/\1_/g; s/_$//')
-          echo "应用 Droidspaces SYSVIPC kABI 修复补丁 (槽位: $SLOT / $SLOT_NAME)..."
-          case "$KERNEL_VER" in
-            6.12|6.18)
-              PATCH_FILE="$DROIDSPACES_PATCHES/kernel-6.12/001.GKI-6.12-or-above-fix_sysvipc_kabi.patch"
-              ;;
-            5.10|5.15|6.1|6.6)
-              PATCH_FILE="$DROIDSPACES_PATCHES/below-kernel-6.12/001.GKI-below-6.12-fix_sysvipc_kabi_${SLOT_NAME}.patch"
-              ;;
-            *)
-              echo "::warning::Droidspaces: 未适配的内核版本 $KERNEL_VER，跳过补丁"
-              exit 0
-              ;;
-          esac
-          if ! patch -p1 --forward < "$PATCH_FILE"; then
-            echo "::warning::SYSVIPC kABI 补丁应用失败，可能已应用或上下文不匹配"
-          fi
-
-          # 5.10 及以下还需要 POSIX_MQUEUE 的 kABI 修复
-          if [ "$KERNEL_VER" = "5.10" ]; then
-            echo "应用 Droidspaces POSIX_MQUEUE kABI 修复补丁 (5.10)..."
-            POSIX_PATCH="$DROIDSPACES_PATCHES/below-kernel-6.12/002.5.10_or_lower_use_android_abi_padding_for_posix_mqueue.patch"
-            if ! patch -p1 --forward < "$POSIX_PATCH"; then
-              echo "::warning::POSIX_MQUEUE kABI 补丁应用失败，可能已应用或上下文不匹配"
-            fi
-          fi
-
-          # Android 16 / 6.12 的 rust_binder.ko 在启用 IPC_NS 后会引用
-          # init_ipc_ns 与 put_ipc_ns，但当前 AOSP common 分支尚未导出这两个符号。
-          # 这里补齐导出，避免 modpost 因 undefined symbol 失败。
-          if [ "$KERNEL_VER" = "6.12" ]; then
-            if [ -f "ipc/msgutil.c" ] && ! grep -qF 'EXPORT_SYMBOL(init_ipc_ns);' "ipc/msgutil.c"; then
-              sed -i '/^struct msg_msgseg {/i EXPORT_SYMBOL(init_ipc_ns);' "ipc/msgutil.c"
-              echo "已为 init_ipc_ns 补充符号导出"
-            fi
-
-            if [ -f "ipc/namespace.c" ] && ! grep -qF 'EXPORT_SYMBOL(put_ipc_ns);' "ipc/namespace.c"; then
-              sed -i '/^static struct ns_common \*ipcns_get(/i EXPORT_SYMBOL(put_ipc_ns);' "ipc/namespace.c"
-              echo "已为 put_ipc_ns 补充符号导出"
-            fi
-          fi
-
-          echo "添加 Droidspaces 内核配置..."
-          # 按文档规则逐个处理: 已启用则跳过, "# not set" 则替换, 不存在则追加
-          enable_config() {
-            local cfg="$1"
-            if grep -q "^${cfg}=y" "$DEFCONFIG"; then
-              echo "  已启用: $cfg"
-            elif grep -q "^# ${cfg} is not set" "$DEFCONFIG"; then
-              sed -i "s/^# ${cfg} is not set$/${cfg}=y/" "$DEFCONFIG"
-              echo "  已切换: $cfg"
-            else
-              echo "${cfg}=y" >> "$DEFCONFIG"
-              echo "  已添加: $cfg"
-            fi
-          }
-
-          config_defined() {
-            local name="${1#CONFIG_}"
-            grep -RqsE --include='Kconfig*' "^[[:space:]]*(menuconfig|config)[[:space:]]+${name}$" .
-          }
-
-          enable_config_if_defined() {
-            local cfg="$1"
-            if config_defined "$cfg"; then
-              enable_config "$cfg"
-            else
-              echo "  当前内核未定义: $cfg，跳过"
-            fi
-          }
-
-          # 必要配置
-          enable_config CONFIG_SYSVIPC
-          enable_config CONFIG_POSIX_MQUEUE
-          enable_config CONFIG_IPC_NS
-          enable_config CONFIG_PID_NS
-          enable_config CONFIG_DEVTMPFS
-
-          # 可选: 网络相关配置 (Docker/NAT 模式)
-          enable_config_if_defined CONFIG_NETFILTER_XT_MATCH_ADDRTYPE
-          enable_config_if_defined CONFIG_NETFILTER_XT_TARGET_LOG
-          enable_config_if_defined CONFIG_NETFILTER_XT_MATCH_RECENT
-          enable_config_if_defined CONFIG_IP_SET
-          enable_config_if_defined CONFIG_IP_SET_HASH_IP
-          enable_config_if_defined CONFIG_IP_SET_HASH_NET
-          enable_config_if_defined CONFIG_NETFILTER_XT_SET
-
-          # REJECT 目标在不同内核版本上的符号名可能不同，按实际存在的配置启用
-          enable_config_if_defined CONFIG_NETFILTER_XT_TARGET_REJECT
-          enable_config_if_defined CONFIG_IP_NF_TARGET_REJECT
-
-          echo "Droidspaces 集成完成"
-
-          echo "GKI6.6 普通用户联网专用配置 (Droidspaces)"
-          # 专门处理 =n 类型的配置（安卓网络权限必须关闭）
-          disable_config() {
-            local cfg="$1"
-            if grep -q "^${cfg}=n" "$DEFCONFIG"; then
-              echo "  已禁用: $cfg"
-            elif grep -q "^${cfg}=y" "$DEFCONFIG"; then
-              sed -i "s/^${cfg}=y$/${cfg}=n/" "$DEFCONFIG"
-              echo "  已关闭: $cfg"
-            else
-              echo "# ${cfg} is not set" >> "$DEFCONFIG"
-              echo "  已添加并禁用: $cfg"
-            fi
-          }
-
-          if [[ "${{ inputs.android_version }}" == "android15" && "${{ inputs.kernel_version }}" == "6.6" ]]; then
-            # 1. 开启用户命名空间（必须）
-            # enable_config_if_defined CONFIG_USER_NS
-            # 2. 关闭安卓严格网络控制（必须）
-            disable_config CONFIG_ANDROID_PARANOID_NETWORK
-          fi
-
-      - name: 注入 NTSync 内核配置
-        if: inputs.clean_build != true && inputs.droidspaces != 'off' && inputs.droidspaces_ntsync
-        working-directory: ${{ env.KERNEL_ROOT }}/common
-        run: |
-          set -e
-          echo "=== 开始注入 NTSync 内核补丁 ==="
-          echo "Android 版本: ${{ inputs.android_version }}"
-          echo "Kernel 版本: ${{ inputs.kernel_version }}"
-
-          case "${{ inputs.android_version }}-${{ inputs.kernel_version }}" in
-            android12-5.10)
-              NTSYNC_PATCH="ntsync_compat_android12-5.10"
-              ;;
-            android13-5.15)
-              NTSYNC_PATCH="ntsync_compat_android13-5.15"
-              ;;
-            android14-5.15)
-              echo "::error::上游尚未提供 Android 14 / 5.15 的 NTSync 兼容补丁"
-              exit 1
-              ;;
-            android14-6.1)
-              NTSYNC_PATCH="ntsync_compat_android14-6.1"
-              ;;
-            android15-6.6)
-              NTSYNC_PATCH="ntsync_compat_android15-6.6"
-              ;;
-            android16-6.12)
-              NTSYNC_PATCH="ntsync_compat_android16-6.12"
-              ;;
-            *)
-              echo "::warning::NTSync: 未适配 ${{ inputs.android_version }} / ${{ inputs.kernel_version }}，跳过补丁"
-              exit 0
-              ;;
-          esac
-
-          echo "自动选择 NTSync 补丁: ${NTSYNC_PATCH}.patch"
-          wget -q "https://raw.githubusercontent.com/Goldzxcbug/Droidspaces_Kernel_patch/refs/heads/main/NTsync/ntsync_base.patch"
-          wget -q "https://raw.githubusercontent.com/Goldzxcbug/Droidspaces_Kernel_patch/refs/heads/main/NTsync/${NTSYNC_PATCH}.patch"
-
-          patch -p1 < "ntsync_base.patch"
-          patch -p1 < "${NTSYNC_PATCH}.patch"
-
-          cd ..
-
-          # 配置路径
-          CONFIG_PATH="./common/arch/arm64/configs/gki_defconfig"
-          echo "正在检查并启用 CONFIG_NTSYNC..."
-
-          # 移除未启用标记，再追加启用项，保证重复运行时保持幂等。
-          sed -i '/CONFIG_NTSYNC is not set/d' "$CONFIG_PATH"
-          if ! grep -q "^CONFIG_NTSYNC=y" "$CONFIG_PATH"; then
-            echo "CONFIG_NTSYNC=y" >> "$CONFIG_PATH"
-            echo "✅ 已成功启用 CONFIG_NTSYNC"
-          else
-            echo "✅ CONFIG_NTSYNC 已处于启用状态"
-          fi
-
-          echo "=== NTSync 补丁与配置注入完成 ==="
-
-      - name: 应用 Unicode 绕过修复
-        if: ${{ inputs.clean_build != true && inputs.enable_susfs && inputs.use_unicode_bypass && !(inputs.android_version == 'android17' && inputs.kernel_version == '6.18') }}
-        working-directory: ${{ env.KERNEL_ROOT }}/common
-        run: |
-          if [ "${{ inputs.kernel_version }}" = "5.10" ] || [ "${{ inputs.kernel_version }}" = "5.15" ]; then
-            patch -p1 --forward < "$ACTION_BUILD/patches/unicode_bypass_fix_6.1-.patch" || true
-          else
-            patch -p1 --forward < "$ACTION_BUILD/patches/unicode_bypass_fix_6.1+.patch" || true
           fi
 
       # ==================== 升级 LZ4 并应用 LZ4KD/LZ4K_OPLUS 补丁 ====================
@@ -1296,131 +1031,8 @@ jobs:
 
       # ==================== 添加 BBG 防格机补丁 ====================
       # BBG (Baseband Guard) 防止基带格式化攻击
-      - name: 添加 BBG 防格机补丁
-        if: inputs.clean_build != true && inputs.use_bbg
-        working-directory: ${{ env.KERNEL_ROOT }}
-        run: |
-          wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
-          echo "CONFIG_BBG=y" >> common/arch/arm64/configs/gki_defconfig
-          sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' common/security/Kconfig
-
       # ==================== 应用 Re-Kernel ====================
       # Re-Kernel 通过 GKI Vendor Hooks 提供内核级保护功能
-      - name: 应用 Re-Kernel
-        if: ${{ inputs.clean_build != true && inputs.use_rekernel && !(inputs.android_version == 'android17' && inputs.kernel_version == '6.18') }}
-        working-directory: ${{ env.KERNEL_ROOT }}
-        run: |
-          set -e
-          echo "Integrating Re-Kernel..."
-          TMP_REKERNEL=/tmp/rekernel
-          rm -rf "$TMP_REKERNEL"
-          git clone --depth 1 https://github.com/Sakion-Team/Re-Kernel.git "$TMP_REKERNEL"
-
-          # Upstream split the LKM into multiple translation units; retain support
-          # for older revisions that still provide a single rekernel.c.
-          mkdir -p common/drivers/rekernel
-          if [[ -f "$TMP_REKERNEL/LKM-Source/rekernel.c" ]]; then
-            cp "$TMP_REKERNEL/LKM-Source/rekernel.c" common/drivers/rekernel/
-            cp "$TMP_REKERNEL/LKM-Source/rekernel.h" common/drivers/rekernel/
-            REKERNEL_LAYOUT="single"
-          elif [[ -f "$TMP_REKERNEL/LKM-Source/rekernel_main.c" \
-              && -f "$TMP_REKERNEL/LKM-Source/rekernel_netlink.c" \
-              && -f "$TMP_REKERNEL/LKM-Source/rekernel_binder.c" \
-              && -f "$TMP_REKERNEL/LKM-Source/rekernel_signal.c" \
-              && -f "$TMP_REKERNEL/LKM-Source/rekernel_netfilter.c" \
-              && -f "$TMP_REKERNEL/LKM-Source/rekernel_internal.h" ]]; then
-            cp "$TMP_REKERNEL"/LKM-Source/rekernel_{main,netlink,binder,signal,netfilter}.c common/drivers/rekernel/
-            cp "$TMP_REKERNEL"/LKM-Source/rekernel{,_internal}.h common/drivers/rekernel/
-            REKERNEL_LAYOUT="split"
-          else
-            echo "::error::Unsupported Re-Kernel source layout"
-            exit 1
-          fi
-
-          # 生成构建配置
-          cat > common/drivers/rekernel/Kconfig << 'EOF'
-          menu "Re:Kernel"
-          config REKERNEL
-              bool "Re:Kernel support (GKI Vendor Hooks)"
-              default y
-              help
-                Enable Re-Kernel support via GKI Vendor Hooks.
-
-          config REKERNEL_NETWORK
-              bool "Re:Kernel NetReceive unfreeze support"
-              depends on REKERNEL
-              default n
-          endmenu
-          EOF
-
-          cat > common/drivers/rekernel/Makefile << 'EOF'
-          obj-$(CONFIG_REKERNEL) += rekernel.o
-          ccflags-$(CONFIG_REKERNEL_NETWORK) += -DNETWORK_FILTER
-          EOF
-          if [ "$REKERNEL_LAYOUT" = "split" ]; then
-            cat >> common/drivers/rekernel/Makefile << 'EOF'
-          rekernel-y := rekernel_main.o rekernel_netlink.o rekernel_binder.o rekernel_signal.o rekernel_netfilter.o
-          EOF
-          fi
-
-          # 挂载到驱动树
-          if ! grep -qF 'source "drivers/rekernel/Kconfig"' common/drivers/Kconfig; then
-            sed -i '/^endmenu$/i source "drivers/rekernel/Kconfig"' common/drivers/Kconfig
-          fi
-          if ! grep -qF "obj-\$(CONFIG_REKERNEL) += rekernel/" common/drivers/Makefile; then
-            echo "obj-\$(CONFIG_REKERNEL) += rekernel/" >> common/drivers/Makefile
-          fi
-
-          REKERNEL_C="common/drivers/rekernel/rekernel.c"
-          if [ "$REKERNEL_LAYOUT" = "split" ]; then
-            REKERNEL_C="common/drivers/rekernel/rekernel_binder.c"
-          fi
-
-          # 修正 binder_internal.h 路径（适配 in-tree 编译）
-          sed -i 's|#include <../android/binder_internal.h>|#include "../../drivers/android/binder_internal.h"|g' "$REKERNEL_C"
-
-          # proc_ops has existed since 5.6; all supported GKI lines are 5.10-6.12.
-          # Convert legacy proc file_operations declarations wherever they occur.
-          for REKERNEL_PATCH_C in common/drivers/rekernel/*.c; do
-            if grep -qF 'struct file_operations' "$REKERNEL_PATCH_C"; then
-              if ! grep -qF 'struct proc_ops' common/include/linux/proc_fs.h; then
-                echo "::error::proc_ops is unavailable in this kernel tree"
-                exit 1
-              fi
-              sed -i \
-                -e 's/struct file_operations/struct proc_ops/g' \
-                -e '/^[[:space:]]*\.owner[[:space:]]*=[[:space:]]*THIS_MODULE,[[:space:]]*$/d' \
-                -e 's/\.read[[:space:]]*=/\.proc_read =/g' \
-                -e 's/\.write[[:space:]]*=/\.proc_write =/g' \
-                -e 's/\.open[[:space:]]*=/\.proc_open =/g' \
-                -e 's/\.release[[:space:]]*=/\.proc_release =/g' \
-                -e 's/\.unlocked_ioctl[[:space:]]*=/\.proc_ioctl =/g' \
-                -e 's/\.compat_ioctl[[:space:]]*=/\.proc_compat_ioctl =/g' \
-                -e 's/\.llseek[[:space:]]*=/\.proc_lseek =/g' "$REKERNEL_PATCH_C"
-            fi
-          done
-
-          # Keep bounded output semantics and fix the legacy Binder format string
-          # whose extra rpc_name/code arguments otherwise trigger format warnings.
-          sed -i \
-            -e 's/snprintf(/scnprintf(/g' \
-            -e 's/sprintf(buff, /scnprintf(buff, sizeof(buff), /g' \
-            -e 's/sprintf(versionBuffer, /scnprintf(versionBuffer, sizeof(versionBuffer), /g' \
-            -e 's|bindertype=%s,oneway=%d,from_pid=%d,from=%d,target_pid=%d,target=%d;"|bindertype=%s,oneway=%d,from_pid=%d,from=%d,target_pid=%d,target=%d,rpc_name=%s,code=%d;"|' \
-            common/drivers/rekernel/*.c
-          if [ "$REKERNEL_LAYOUT" = "single" ]; then
-            REKERNEL_H="common/drivers/rekernel/rekernel.h"
-            VERSION_MACRO="KERNEL_$(echo "${{ inputs.kernel_version }}" | tr '.' '_')"
-            if grep -q "^// #define ${VERSION_MACRO}$" "$REKERNEL_H"; then
-              sed -i "s|^// #define ${VERSION_MACRO}$|#define ${VERSION_MACRO}|" "$REKERNEL_H"
-            fi
-            grep -qF '#include <linux/seq_file.h>' "$REKERNEL_C" || sed -i '1i#include <linux/seq_file.h>' "$REKERNEL_C"
-          fi
-
-          # 配置 defconfig（幂等）
-          grep -q '^CONFIG_REKERNEL=y$' "$DEFCONFIG" || echo "CONFIG_REKERNEL=y" >> "$DEFCONFIG"
-          grep -q '^CONFIG_REKERNEL_NETWORK=y$' "$DEFCONFIG" || echo "CONFIG_REKERNEL_NETWORK=y" >> "$DEFCONFIG"
-
       # ==================== 配置内核选项 ====================
       # 添加 KernelSU 和其他必要的内核配置
       - name: 配置内核选项
@@ -1640,96 +1252,7 @@ jobs:
 
           cp "$SRC_DIR/Image" ./
 
-      # ==================== 激活 Bypass 构建 ====================
-      # Bypass 只放宽内核模块版本校验，普通 Image 始终保留为默认产物。
-      - name: 激活 Bypass 内核补丁
-        if: inputs.build_bypass
-        working-directory: ${{ env.KERNEL_ROOT }}
-        run: |
-          set -e
-
-          if [ -f "common/kernel/module/version.c" ] && grep -q 'bad_version:' "common/kernel/module/version.c"; then
-            TARGET_FILE="common/kernel/module/version.c"
-          elif [ -f "common/kernel/module.c" ] && grep -q 'bad_version:' "common/kernel/module.c"; then
-            TARGET_FILE="common/kernel/module.c"
-          else
-            echo "::error::未找到内核模块版本校验文件"
-            exit 1
-          fi
-
-          # 与上游实现一致：仅修改 bad_version 代码块中的第一个 return 0。
-          sed -i '/bad_version:/{:a;n;/return 0;/{s/return 0;/return 1;/;b};ba}' "$TARGET_FILE"
-
-          if ! sed -n '/bad_version:/,/return [01];/p' "$TARGET_FILE" | grep -q 'return 1;'; then
-            echo "::error::Bypass 补丁应用失败，bad_version 中未找到 return 1"
-            sed -n '/bad_version:/,/return [01];/p' "$TARGET_FILE" || true
-            exit 1
-          fi
-          echo "已启用 Bypass 内核模块版本校验绕过: $TARGET_FILE"
-
-      # ==================== 编译 Bypass 内核 ====================
       # 使用与普通内核完全相同的构建参数，确保两个 Image 只在校验逻辑上不同。
-      - name: 构建 Bypass 内核
-        if: inputs.build_bypass
-        uses: nick-fields/retry@v4
-        with:
-          timeout_minutes: 30
-          max_attempts: 3
-          retry_on: timeout
-          command: |
-            echo "开始构建 Bypass 内核"
-            set -ex
-            cd "$KERNEL_ROOT"
-
-            sed -i 's/BUILD_SYSTEM_DLKM=1/BUILD_SYSTEM_DLKM=0/' ./common/build.config.gki.aarch64
-            sed -i '/MODULES_ORDER=android\/gki_aarch64_modules/d' ./common/build.config.gki.aarch64
-            sed -i '/KMI_SYMBOL_LIST_STRICT_MODE/d' ./common/build.config.gki.aarch64
-
-            if [ -f "build/build.sh" ]; then
-              # 5.x 内核使用传统构建脚本
-              LTO=thin BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh CC="/usr/bin/ccache clang" || exit 1
-              strings "out/${{ inputs.android_version }}-${{ inputs.kernel_version }}/dist/Image" | grep 'Linux version'
-            else
-              # 6.1+ 内核使用 Bazel 构建
-              FRAG="common/arch/arm64/configs/ksu.fragment"
-              if [ ! -f "$FRAG" ]; then
-                echo "::error::普通构建未生成 KSU 配置 fragment: $FRAG"
-                exit 1
-              fi
-              cp "$DEFCONFIG.orig" "$DEFCONFIG"
-              echo "=== Bypass KSU Fragment 内容 ==="
-              cat "$FRAG"
-              echo "================================"
-              FRAG_FLAG=""
-              if [ -s "$FRAG" ]; then
-                FRAG_FLAG="--defconfig_fragment=//common:arch/arm64/configs/ksu.fragment"
-              fi
-              LTO_FLAG="--lto=thin"
-              if [ "${{ inputs.kernel_version }}" = "6.12" ] || [ "${{ inputs.kernel_version }}" = "6.18" ]; then
-                LTO_FLAG="--lto=none"
-              fi
-              tools/bazel build --disk_cache=/home/runner/.cache/bazel --config=fast $LTO_FLAG $FRAG_FLAG //common:kernel_aarch64_dist || exit 1
-              strings ./bazel-bin/common/kernel_aarch64/Image | grep 'Linux version'
-            fi
-
-            echo "Bypass 内核构建完成"
-
-      # ==================== 准备 Bypass Image ====================
-      - name: 准备 Bypass 内核 Image
-        if: inputs.build_bypass
-        run: |
-          if [ "${{ inputs.android_version }}" == "android12" ] || [ "${{ inputs.android_version }}" == "android13" ]; then
-            SRC_DIR="$KERNEL_ROOT/out/${{ inputs.android_version }}-${{ inputs.kernel_version }}/dist"
-          else
-            SRC_DIR="$KERNEL_ROOT/bazel-bin/common/kernel_aarch64"
-          fi
-
-          if [ ! -f "$SRC_DIR/Image" ]; then
-            echo "::error::未找到 Bypass 构建产物: $SRC_DIR/Image"
-            exit 1
-          fi
-          cp "$SRC_DIR/Image" ./Bypass-Image
-
       # ==================== 打包并签名 boot 镜像 ====================
       # 目的：构建完直接产出「签好名、可直接 fastboot/dd 刷入」的 boot 镜像，
       #       省掉本地重打包 + 手动签名两步。
@@ -1814,14 +1337,6 @@ jobs:
           cd $ANYKERNEL3
           ZIP_NAME="${CONFIG}-${BUILD_VARIANT}-AnyKernel3.zip"
           mv ../Image ./Image
-          if [ "${{ inputs.build_bypass }}" = "true" ]; then
-            if [ ! -f "../Bypass-Image" ]; then
-              echo "::error::未找到 Bypass-Image，停止打包"
-              exit 1
-            fi
-            mv ../Bypass-Image ./Bypass-Image
-            patch -p1 --forward < "$GITHUB_WORKSPACE/.github/patches/bypass.patch"
-          fi
           zip -r "../$ZIP_NAME" ./*
 
       # ==================== 构建 Boot 镜像 (Android 12) ====================
