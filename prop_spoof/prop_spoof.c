@@ -602,7 +602,6 @@ static struct hlist_node *lsm_hook_linked;
 
 /* /sys/devices/soc0 目录 inode：MTK/高通都有 soc bus，用来区分专属文件。
  * 目标 uid 访问该目录下任何文件 → -ENOENT，伪装成天玑机的正确形态 */
-static struct inode *soc0_dir_inode;
 
 static bool uid_match_current(void)
 {
@@ -1037,24 +1036,6 @@ static int patch_build_heap(void)
 /* file_open 钩子：覆盖目标进程对属性文件的懒加载 open */
 static struct security_hook_list prop_lsm_hook_open;
 
-/* 高通 socinfo 专属的文件名：MTK 的 mtk-socinfo 只导出 machine/family/soc_id/revision。
- * 注意 readdir 仍会列出这些名字（kernfs 在 iterate 时生成目录项，不经过 file_open），
- * 这里拦的是 open/read，保证拿不到内容。 */
-static bool soc0_is_qcom_only(const char *n)
-{
-	static const char *const q[] = {
-		"chip_family", "chip_id", "chip_name", "pcode",
-		"serial_number", "platform_version", "vendor",
-		"build_id", "image_crm_version", "image_variant", "subtype",
-	};
-	int i;
-
-	for (i = 0; i < (int)ARRAY_SIZE(q); i++)
-		if (!strcmp(n, q[i]))
-			return true;
-	return false;
-}
-
 static int lsm_file_open(struct file *file)
 {
 	struct prop_hook *h;
@@ -1062,18 +1043,6 @@ static int lsm_file_open(struct file *file)
 
 	if (!file || !file->f_inode)
 		return 0;
-	/* soc0：目录本身必须保留 —— MTK 机型同样有 soc bus（mtk-socinfo 驱动也注册
-	 * soc0），把它抹成「不存在」反而造出一个原厂没有的异常。
-	 * 现在的处理：通用属性（machine/family/soc_id/revision）由 sysdir 供 MTK 假值，
-	 * 只有高通 socinfo 专属文件返回 ENOENT。 */
-	if (soc0_dir_inode && uid_match_current()) {
-		struct dentry *dn = file->f_path.dentry;
-
-		if (dn && dn->d_parent &&
-		    dn->d_parent->d_inode == soc0_dir_inode &&
-		    soc0_is_qcom_only((const char *)dn->d_name.name))
-			return -ENOENT;
-	}
 	h = prop_hook_find(file->f_inode);
 	if (!h)
 		return 0;
@@ -1344,8 +1313,23 @@ static int prop_hooks_install(void)
 		 * MTK 的 mtk-socinfo 同样注册 soc0，只导出 machine/family/soc_id/revision，
 		 * 所以这几个要给 MTK 假值；高通专属文件由 lsm_file_open 拦 ENOENT。 */
 		{
+			/* 全部 soc0 节点都给假值（不拦 ENOENT）：高通 socinfo 会导出
+			 * 38 个节点，MTK 的 mtk-socinfo 只有 4 个。名字消不掉（kernfs
+			 * readdir 不经过 file_open），所以内容是唯一能控制的部分 ——
+			 * 全部改写成 MTK 风格，避免 sku=SUNP-3-AB / hw_platform=QRD
+			 * 这类直接暴露骁龙代号的真值被读走。 */
 			static const char *soc0_files[] = {
 				"machine", "family", "soc_id", "revision",
+				"chip_family", "chip_id", "chip_name", "pcode",
+				"serial_number", "platform_version",
+				"platform_subtype", "platform_subtype_id",
+				"hw_platform", "sku", "feature_code",
+				"raw_package_type", "num_clusters", "num_subset_parts",
+				"ncluster_array_offset", "nsubset_parts_array_offset",
+				"subset_cores", "subset_parts",
+				"modem", "nsp", "spss", "npu", "eva",
+				"comp", "comp1", "gpu", "display", "display1",
+				"video", "camera", "audio", "sensors", "wlan", "nav",
 			};
 			int s0 = 0;
 
@@ -1384,16 +1368,6 @@ static int prop_hooks_install(void)
 		}
 	}
 
-	/* soc0 目录 inode：用于把高通专属文件对目标 uid 拦成 ENOENT */
-	{
-		struct file *sf = fo("/sys/devices/soc0/machine", O_RDONLY, 0);
-		if (!IS_ERR(sf)) {
-			soc0_dir_inode = sf->f_path.dentry->d_parent->d_inode;
-			ihold(soc0_dir_inode);
-			filp_close(sf, NULL);
-			pr_info("prop_spoof: soc0 目录已登记 (ENOENT 伪装)\n");
-		}
-	}
 
 	prop_hooked = true;
 	return prepped > 0 ? 0 : -EINVAL;
@@ -1413,10 +1387,6 @@ static void prop_hooks_remove(void)
 			iput(h->inode);
 		h->inode = NULL;
 		h->fake_file = NULL;
-	}
-	if (soc0_dir_inode) {
-		iput(soc0_dir_inode);
-		soc0_dir_inode = NULL;
 	}
 	prop_hooked = false;
 }
