@@ -38,6 +38,8 @@
 #include <linux/security.h>
 #include <linux/lsm_hooks.h>
 #include <linux/sched/mm.h>
+#include <linux/workqueue.h>
+#include <linux/jiffies.h>
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("");
@@ -382,6 +384,20 @@ static char cfg_uids[512];
 static char cfg_reals[2048];
 static char cfg_fakes[2048];
 static bool builtin_started;
+static bool nodes_hidden;
+
+/* proc 节点自毁：配置全部下发、假文件引用都已被内核持有之后，
+ * 把 /proc/prop_spoof 和 /proc/prop_spoof_cfg 从 procfs 摘掉。
+ * 目的：任何进程 ls /proc 都看不到这两个名字（名字本身就是线索）。
+ * 为什么要延迟：不能在 cfg_write 自己的调用栈里 remove 正在写的文件。 */
+static void prop_hide_work_fn(struct work_struct *w)
+{
+	remove_proc_entry("prop_spoof", NULL);
+	remove_proc_entry("prop_spoof_cfg", NULL);
+	nodes_hidden = true;
+	pr_info("prop_spoof: proc 节点已隐藏（重新配置需重启）\n");
+}
+static DECLARE_DELAYED_WORK(prop_hide_work, prop_hide_work_fn);
 
 static int cfg_show(struct seq_file *m, void *v)
 {
@@ -448,6 +464,9 @@ static ssize_t cfg_write(struct file *f, const char __user *ub, size_t n,
 				else
 					pr_info("prop_spoof: cfg build pairs 就绪\n");
 			}
+		} else if (!strcmp(line, "hide")) {
+			schedule_delayed_work(&prop_hide_work, 2 * HZ);
+			pr_info("prop_spoof: cfg hide 已排程\n");
 		} else if (!strcmp(line, "start")) {
 			int r;
 			if (builtin_started) {
@@ -1025,11 +1044,18 @@ static int lsm_file_open(struct file *file)
 
 	if (!file || !file->f_inode)
 		return 0;
-	/* soc0（高通专属）对目标 uid 直接 ENOENT：MTK 机型没有这个目录 */
-	if (soc0_dir_inode && file->f_path.dentry->d_parent &&
-	    file->f_path.dentry->d_parent->d_inode == soc0_dir_inode &&
-	    uid_match_current())
-		return -ENOENT;
+	/* soc0（高通 socinfo 专属，MTK 机型没有）对目标 uid 直接 ENOENT：
+	 * ① 目录下任何文件读取 → ENOENT
+	 * ② 目录本身 open → ENOENT（ls /sys/devices/soc0 直接失败，
+	 *    否则 chip_family / serial_number / pcode 这些高通专属名字仍会被列出来） */
+	if (soc0_dir_inode && uid_match_current()) {
+		struct dentry *dn = file->f_path.dentry;
+
+		if (dn && (dn->d_inode == soc0_dir_inode ||
+			   (dn->d_parent &&
+			    dn->d_parent->d_inode == soc0_dir_inode)))
+			return -ENOENT;
+	}
 	h = prop_hook_find(file->f_inode);
 	if (!h)
 		return 0;
@@ -1541,12 +1567,19 @@ err:
 
 static void __exit prop_spoof_exit(void)
 {
+#ifdef PROP_SPOOF_BUILTIN
+	cancel_delayed_work_sync(&prop_hide_work);
+#endif
 	lsm_remove();
 	prop_hooks_remove();
 	hook_remove();
-	remove_proc_entry("prop_spoof", NULL);
 #ifdef PROP_SPOOF_BUILTIN
-	remove_proc_entry("prop_spoof_cfg", NULL);
+	if (!nodes_hidden) {
+		remove_proc_entry("prop_spoof", NULL);
+		remove_proc_entry("prop_spoof_cfg", NULL);
+	}
+#else
+	remove_proc_entry("prop_spoof", NULL);
 #endif
 	mutex_lock(&fake_lock);
 	vfree(fake_buf);
