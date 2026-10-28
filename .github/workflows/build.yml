@@ -1730,6 +1730,84 @@ jobs:
           fi
           cp "$SRC_DIR/Image" ./Bypass-Image
 
+      # ==================== 打包并签名 boot 镜像 ====================
+      # 目的：构建完直接产出「签好名、可直接 fastboot/dd 刷入」的 boot 镜像，
+      #       省掉本地重打包 + 手动签名两步。
+      # 要点：
+      #   · 本机 boot.img 的 GKI v4 header 极简（只有 magic / kernel_size /
+      #     header_size=1584 / header_version=4 四个非零字段，cmdline 与 os_version 全 0），
+      #     所以这里直接凭空合成 header，不需要上传 96MB 原厂 boot.img
+      #   · 私钥从 secrets.AVB_KEY_B64 取（base64 编码的 PEM），不落地到仓库
+      #   · 未配置 secret 时自动跳过，不影响其他产物
+      #   · 签名参数与真机一致：SHA256_RSA4096 / partition boot / 100663296 字节
+      - name: 打包并签名 boot 镜像
+        env:
+          AVB_KEY_B64: ${{ secrets.AVB_KEY_B64 }}
+          BOOT_FINGERPRINT: Lenovo/TB322FC_PRC/TB322FC:17/CQ2A.260712.001/ZUXOS_2.5.02.086_261010_PRC:user/release-keys
+        run: |
+          set -e
+          if [ -z "$AVB_KEY_B64" ]; then
+            echo "::warning::未配置 AVB_KEY_B64 secret，跳过 boot 镜像签名"
+            exit 0
+          fi
+          if [ ! -f ./Image ]; then
+            echo "::error::找不到 ./Image，无法打包 boot"
+            exit 1
+          fi
+
+          TMP="$RUNNER_TEMP/bootpack"
+          mkdir -p "$TMP"
+
+          # 私钥与 avbtool（用完即删）
+          printf '%s' "$AVB_KEY_B64" | base64 -d > "$TMP/key.pem"
+          chmod 600 "$TMP/key.pem"
+          curl -fsSL "https://android.googlesource.com/platform/external/avb/+/refs/heads/main/avbtool.py?format=TEXT" \
+            | base64 -d > "$TMP/avbtool.py"
+
+          # 合成 GKI v4 boot 镜像（header 1584 + 页对齐 + Image）
+          python3 - "$TMP" <<'PY'
+          import struct, sys, os
+          tmp = sys.argv[1]
+          img = open('Image', 'rb').read()
+          if len(img) + 4096 + 8192 > 100663296:
+              raise SystemExit('[-] kernel 太大，装不进 96MB boot 分区')
+          h = bytearray(1584)
+          h[0:8] = b'ANDROID!'
+          struct.pack_into('<I', h, 8, len(img))    # kernel_size
+          struct.pack_into('<I', h, 12, 0)          # ramdisk_size
+          struct.pack_into('<I', h, 16, 0)          # os_version
+          struct.pack_into('<I', h, 20, 1584)       # header_size
+          struct.pack_into('<I', h, 40, 4)          # header_version
+          out = os.path.join(tmp, 'boot.img')
+          with open(out, 'wb') as f:
+              f.write(h)
+              f.write(b'\x00' * (4096 - 1584))
+              f.write(img)
+          print('[+] unsigned boot: %d bytes (kernel %d)' % (os.path.getsize(out), len(img)))
+          PY
+
+          python3 "$TMP/avbtool.py" add_hash_footer \
+            --image "$TMP/boot.img" \
+            --partition_size 100663296 \
+            --partition_name boot \
+            --hash_algorithm sha256 \
+            --algorithm SHA256_RSA4096 \
+            --key "$TMP/key.pem" \
+            --prop "com.android.build.boot.os_version:15" \
+            --prop "com.android.build.boot.fingerprint:$BOOT_FINGERPRINT" \
+            --prop "com.android.build.boot.security_patch:2025-02-05"
+
+          python3 "$TMP/avbtool.py" verify_image --image "$TMP/boot.img" --key "$TMP/key.pem"
+
+          OUT="${CONFIG}-boot-signed.img"
+          cp "$TMP/boot.img" "./$OUT"
+          ls -l "./$OUT"
+          echo "BOOT_IMG=$OUT" >> $GITHUB_ENV
+
+          python3 "$TMP/avbtool.py" info_image --image "./$OUT" | head -8
+
+          rm -f "$TMP/key.pem" "$TMP/avbtool.py" "$TMP/boot.img"
+
       # ==================== 创建 AnyKernel3 压缩包 ====================
       - name: 创建 AnyKernel3 压缩包
         run: |
@@ -1842,7 +1920,7 @@ jobs:
           name: ${{ env.BUILD_VARIANT }}_kernel-${{ env.CONFIG }}
           path: |
             *AnyKernel3.zip
-#            *.img
+            *-boot-signed.img
           compression-level: 0
 
       # ==================== 上传补丁冲突文件 ====================
