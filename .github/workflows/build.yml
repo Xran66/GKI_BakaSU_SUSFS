@@ -1281,11 +1281,26 @@ jobs:
           TMP="$RUNNER_TEMP/bootpack"
           mkdir -p "$TMP"
 
-          # 私钥与 avbtool（用完即删）
-          printf '%s' "$AVB_KEY_B64" | base64 -d > "$TMP/key.pem"
+          # 私钥：兼容两种 secret 格式（base64 单行 / PEM 原文），用完即删
+          case "$AVB_KEY_B64" in
+            *"-----BEGIN"*)
+              printf '%s\n' "$AVB_KEY_B64" > "$TMP/key.pem" ;;
+            *)
+              printf '%s' "$AVB_KEY_B64" | tr -d ' \r\n\t' | base64 -d > "$TMP/key.pem" 2>/dev/null \
+                || { echo "::error::AVB_KEY_B64 既不是 PEM 也不是合法 base64"; exit 1; } ;;
+          esac
+          if ! grep -q "BEGIN .*PRIVATE KEY" "$TMP/key.pem"; then
+            echo "::error::私钥解析失败，请检查 AVB_KEY_B64 secret"
+            exit 1
+          fi
           chmod 600 "$TMP/key.pem"
-          curl -fsSL "https://android.googlesource.com/platform/external/avb/+/refs/heads/main/avbtool.py?format=TEXT" \
-            | base64 -d > "$TMP/avbtool.py"
+          # avbtool：优先用 runner 自带的，不可用再下载
+          AVB="$AVBTOOL"
+          if [ ! -x "$AVB" ] || ! python3 "$AVB" version >/dev/null 2>&1; then
+            curl -fsSL "https://android.googlesource.com/platform/external/avb/+/refs/heads/main/avbtool.py?format=TEXT" \
+              | base64 -d > "$TMP/avbtool.py"
+            AVB="$TMP/avbtool.py"
+          fi
 
           # 合成 GKI v4 boot 镜像（header 1584 + 页对齐 + Image）
           python3 - "$TMP" <<'PY'
@@ -1309,7 +1324,7 @@ jobs:
           print('[+] unsigned boot: %d bytes (kernel %d)' % (os.path.getsize(out), len(img)))
           PY
 
-          python3 "$TMP/avbtool.py" add_hash_footer \
+          python3 "$AVB" add_hash_footer \
             --image "$TMP/boot.img" \
             --partition_size 100663296 \
             --partition_name boot \
@@ -1320,16 +1335,17 @@ jobs:
             --prop "com.android.build.boot.fingerprint:$BOOT_FINGERPRINT" \
             --prop "com.android.build.boot.security_patch:2025-02-05"
 
-          python3 "$TMP/avbtool.py" verify_image --image "$TMP/boot.img" --key "$TMP/key.pem"
+          python3 "$AVB" verify_image --image "$TMP/boot.img" --key "$TMP/key.pem"
 
           OUT="${CONFIG}-boot-signed.img"
           cp "$TMP/boot.img" "./$OUT"
           ls -l "./$OUT"
           echo "BOOT_IMG=$OUT" >> $GITHUB_ENV
 
-          python3 "$TMP/avbtool.py" info_image --image "./$OUT" | head -8
+          python3 "$AVB" info_image --image "./$OUT" | head -8
 
           rm -f "$TMP/key.pem" "$TMP/avbtool.py" "$TMP/boot.img"
+          rm -rf "$TMP"
 
       # ==================== 创建 AnyKernel3 压缩包 ====================
       - name: 创建 AnyKernel3 压缩包
