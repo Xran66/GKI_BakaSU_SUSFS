@@ -1209,6 +1209,9 @@ static int prop_hooks_install(void)
 			"topology/thread_siblings_list",
 			"cpufreq/cpuinfo_max_freq",
 			"cpufreq/cpuinfo_min_freq",
+			/* DevCheck 的"调频器"一栏直接读这个值：真机高通是 walt，
+			 * MTK 用的是 schedutil —— 不换等于自报骁龙 */
+			"cpufreq/scaling_governor",
 			/* cache 布局：真机(高通)与假 SoC(MT6993 天玑) 的
 			 * 缓存大小/共享簇完全不同，检测者读 size/shared_cpu_list
 			 * 即可戳穿 —— 全部替换为天玑 9400 布局假文件。
@@ -1365,6 +1368,53 @@ static int prop_hooks_install(void)
 				s0++;
 			}
 			pr_info("prop_spoof: /sys soc0 伪装就绪 prepped=%d\n", s0);
+		}
+
+		{
+			/* /proc/device-tree 是 /sys/firmware/devicetree/base 的 symlink，
+			 * 解析后同一 inode，拦一次两边都覆盖。
+			 * 真值 "Qualcomm Technologies, Inc. Sun QRD SKU2 V8 Power Grid"
+			 * / "qcom,sun-qrd" —— Sun 就是 SM8750 平台代号，任何读设备树
+			 * 的工具（DevCheck / 反作弊 / 验机）都会据此判定骁龙。 */
+			static const char *dt_files[] = {
+				"model", "compatible",
+			};
+			int d0 = 0;
+
+			for (j = 0; j < (int)ARRAY_SIZE(dt_files); j++) {
+				struct file *real0, *fake0;
+				struct prop_hook *h0;
+
+				if (prop_hook_count >= PROP_MAX_FILES)
+					break;
+				snprintf(rp, sizeof(rp),
+					 "/sys/firmware/devicetree/base/%s",
+					 dt_files[j]);
+				snprintf(fp, sizeof(fp),
+					 "%s/firmware/devicetree/base/%s",
+					 sys_fake_dir, dt_files[j]);
+				real0 = fo(rp, O_RDONLY, 0);
+				if (IS_ERR(real0)) {
+					skipped++;
+					continue;
+				}
+				fake0 = fo(fp, O_RDONLY, 0);
+				if (IS_ERR(fake0)) {
+					filp_close(real0, NULL);
+					skipped++;
+					continue;
+				}
+				h0 = &prop_hooks[prop_hook_count++];
+				snprintf(h0->name, PROP_NAME_LEN, "dt/%s",
+					 dt_files[j]);
+				h0->inode = real0->f_inode;
+				h0->fake_file = fake0;
+				h0->orig_fops = h0->inode->i_fop;
+				ihold(h0->inode);
+				filp_close(real0, NULL);
+				d0++;
+			}
+			pr_info("prop_spoof: device-tree 伪装就绪 prepped=%d\n", d0);
 		}
 	}
 
