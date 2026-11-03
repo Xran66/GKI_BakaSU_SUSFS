@@ -1085,6 +1085,23 @@ jobs:
           CONFIG_KSU_SUSFS_SUS_MAP=y
           EOF
 
+      # ==================== 修复 SUSFS 新版 unused 函数 ====================
+      # 上游 2026-11 起在 susfs.c 加入了仅部分 KSU fork 使用的 KSU domain 切换函数，
+      # 在 BakaSU 下未被调用，触发 -Werror,-Wunused-function 直接编译失败。
+      # 按内核惯例加 __maybe_unused，不改逻辑。
+      - name: 修复 SUSFS unused 函数
+        if: ${{ inputs.clean_build != true && inputs.enable_susfs && !(inputs.android_version == 'android17' && inputs.kernel_version == '6.18') }}
+        run: |
+          F="$KERNEL_ROOT/common/fs/susfs.c"
+          if [ ! -f "$F" ]; then
+            echo "susfs.c 不存在，跳过"
+            exit 0
+          fi
+          sed -i 's/^static struct cred \*susfs_switch_to_ksu_domain(void)/static struct cred __maybe_unused *susfs_switch_to_ksu_domain(void)/' "$F"
+          sed -i 's/^static void susfs_restore_creds(struct cred \*orig_cred)/static void __maybe_unused susfs_restore_creds(struct cred \*orig_cred)/' "$F"
+          echo "--- 修复结果 ---"
+          grep -n "susfs_switch_to_ksu_domain\|susfs_restore_creds" "$F" | head -6
+
       # ==================== 配置内核名称 ====================
       - name: 配置内核名称
         working-directory: ${{ env.KERNEL_ROOT }}
