@@ -97,6 +97,11 @@ on:
         required: false
         type: boolean
         default: false
+      lineage_hide:
+        description: "Lineage_Hide procfs 清洗补丁"
+        required: false
+        type: boolean
+        default: false
       use_prop_spoof:
         description: "集成 prop_spoof 属性伪装（内建，参数由配套模块注入）"
         required: false
@@ -142,3 +147,4 @@ jobs:
       use_nomount: ${{ inputs.use_nomount || false }}
       use_prop_spoof: ${{ inputs.use_prop_spoof || false }}
       prop_spoof_trace: ${{ inputs.prop_spoof_trace || false }}
+      lineage_hide: ${{ inputs.lineage_hide || false }}
