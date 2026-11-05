@@ -699,6 +699,20 @@ jobs:
 
           patch -p1 < 50_add_susfs_in_gki-${{ inputs.android_version }}-${{ inputs.kernel_version }}.patch || true
 
+          # ACK head（6.12.96）exec.c include 区上下文漂移，Hunk#1 可能失败：
+          # 补丁调用已注入但 susfs_def.h 未包含 -> 编译期 implicit declaration。
+          # 补丁后检测并自动补 include（与 pre-patch 修复逻辑互为兜底）。
+          if grep -q 'susfs_is_current_proc_umounted\|susfs_is_current_proc_no_su' fs/exec.c && ! grep -qF '#include <linux/susfs_def.h>' fs/exec.c; then
+            if grep -qF '#include <linux/dma-buf.h>' fs/exec.c; then
+              sed -i '/#include <linux\/dma-buf.h>/a #ifdef CONFIG_KSU_SUSFS\n#include <linux\/susfs_def.h>\n#endif' fs/exec.c
+            elif grep -qF '#include <linux/ksm.h>' fs/exec.c; then
+              sed -i '/#include <linux\/ksm.h>/a #ifdef CONFIG_KSU_SUSFS\n#include <linux\/susfs_def.h>\n#endif' fs/exec.c
+            else
+              sed -i '0,/^#include <linux\/sched.h>/s//#ifdef CONFIG_KSU_SUSFS\n#include <linux\/susfs_def.h>\n#endif\n&/' fs/exec.c
+            fi
+            echo "已修复 exec.c 缺少 susfs_def.h（post-patch）"
+          fi
+
           # 主补丁应用后还原临时上下文，避免无关源码差异保留到最终产物
           if [[ "${{ inputs.android_version }}" == "android12" && "${{ inputs.kernel_version }}" == "5.10" ]]; then
             if [[ "$CURRENT_SUB" -le 43 ]]; then
