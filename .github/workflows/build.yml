@@ -416,7 +416,7 @@ jobs:
 
           # prop_spoof 构建：把 kernel/common 锁定到真机内核基线 commit，
           # 避免 rolling LTS 分支把 6.6.139 编成最新子版本（vermagic 不匹配）
-          if [ "${{ inputs.use_prop_spoof }}" = "true" ]; then
+          if [ "${{ inputs.use_prop_spoof }}" = "true" ] && { [ "${{ inputs.os_patch_level }}" = "lts" ] || [ "${{ inputs.os_patch_level }}" = "head" ]; }; then
             case "${{ inputs.android_version }}-${{ inputs.kernel_version }}" in
               "android15-6.6")
                 LIVE_COMMIT="5d4cdf2ffe450963010006be4b2f07e51702995b"
