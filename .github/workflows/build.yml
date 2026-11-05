@@ -376,7 +376,7 @@ jobs:
           REMOTE_BRANCH=$(retry 4 15 git ls-remote --heads https://android.googlesource.com/kernel/common "refs/heads/${FORMATTED_BRANCH}")
           DEFAULT_MANIFEST_PATH=.repo/manifests/default.xml
 
-          if [ -n "${{ inputs.revision }}" ] && [ "${{ inputs.os_patch_level }}" != "lts" ]; then
+          if [ -n "${{ inputs.revision }}" ] && [ "${{ inputs.os_patch_level }}" != "lts" ] && [ "${{ inputs.os_patch_level }}" != "head" ]; then
             RELEASE_TAG="${FORMATTED_BRANCH}_${{ inputs.revision }}"
             TAG_REF=$(retry 4 15 git ls-remote --tags --refs https://android.googlesource.com/kernel/common "refs/tags/${RELEASE_TAG}")
             if [ -z "$TAG_REF" ]; then
