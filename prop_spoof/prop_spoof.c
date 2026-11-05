@@ -34,6 +34,7 @@
 #include <linux/cred.h>
 #include <linux/version.h>
 #include <linux/mm.h>
+#include <linux/dcache.h>
 #include <linux/mm_inline.h>
 #include <linux/security.h>
 #include <linux/lsm_hooks.h>
@@ -256,6 +257,14 @@ static size_t fake_len;
 static DEFINE_MUTEX(fake_lock);
 static bool hooked;
 
+/* ---- /proc/version 伪装：假串缓冲 + PDE proc_ops 替换 ---- */
+static char *ver_buf;
+static size_t ver_len;
+static struct proc_dir_entry *ver_pde;
+static struct proc_ops ver_spoof_ops;
+static const struct proc_ops *ver_orig_ops_ptr;
+static bool ver_hooked;
+
 #define MAX_TARGET_UIDS 16
 static int uid_list[MAX_TARGET_UIDS];
 static int uid_count;
@@ -464,6 +473,24 @@ static ssize_t cfg_write(struct file *f, const char __user *ub, size_t n,
 				else
 					pr_info("prop_spoof: cfg build pairs 就绪\n");
 			}
+		} else if (!strncmp(line, "verfile ", 8)) {
+			/* version 假串上传：/proc/version 对目标 uid 显示此内容 */
+			const char *txt = line + 8;
+			size_t vn = strlen(txt);
+			char *nv = vmalloc(vn + 2);
+
+			if (nv) {
+				memcpy(nv, txt, vn);
+				nv[vn] = '\n';
+				nv[vn + 1] = '\0';
+				mutex_lock(&fake_lock);
+				vfree(ver_buf);
+				ver_buf = nv;
+				ver_len = vn + 1;
+				mutex_unlock(&fake_lock);
+				pr_info("prop_spoof: verfile 已更新 len=%zu\n",
+					ver_len);
+			}
 		} else if (!strcmp(line, "hide")) {
 			schedule_delayed_work(&prop_hide_work, 2 * HZ);
 			pr_info("prop_spoof: cfg hide 已排程\n");
@@ -476,6 +503,8 @@ static ssize_t cfg_write(struct file *f, const char __user *ub, size_t n,
 			r = hook_install();
 			if (!r)
 				r = prop_hooks_install();
+			if (!r)
+				ver_hook_install();	/* 失败不阻断 start */
 			if (!r)
 				r = lsm_install();
 			if (r) {
@@ -499,7 +528,8 @@ static const struct proc_ops cfg_ops = {
 };
 #endif /* PROP_SPOOF_BUILTIN */
 
-static struct proc_dir_entry *find_cpuinfo_pde(void){
+static struct proc_dir_entry *find_proc_pde(const char *want)
+{
 	struct proc_dir_entry *root = PROP_PROC_ROOT();
 	struct proc_dir_entry tmp;
 	char namebuf[40];
@@ -525,13 +555,17 @@ static struct proc_dir_entry *find_cpuinfo_pde(void){
 					     sizeof(namebuf) - 1))
 			break;
 		namebuf[sizeof(namebuf) - 1] = '\0';
-		c = strcmp(namebuf, "cpuinfo");
+		c = strcmp(namebuf, want);
 		if (c == 0)
 			return pde;
 		n = (c < 0) ? tmp.subdir_node.rb_left
 			    : tmp.subdir_node.rb_right;
 	}
 	return NULL;
+}
+
+static struct proc_dir_entry *find_cpuinfo_pde(void){
+	return find_proc_pde("cpuinfo");
 }
 
 static int hook_install(void)
@@ -579,6 +613,68 @@ static void hook_remove(void)
 	pr_info("prop_spoof: cpuinfo hook 已恢复\n");
 	hooked = false;
 	cpuinfo_pde = NULL;
+}
+
+/* ---- /proc/version 伪装：目标 uid 读到假串（对齐真机内核版本） ---- */
+static struct proc_dir_entry *find_proc_pde(const char *want);
+
+static int ver_show(struct seq_file *m, void *v)
+{
+	mutex_lock(&fake_lock);
+	if (ver_buf && ver_len)
+		seq_write(m, ver_buf, ver_len);
+	mutex_unlock(&fake_lock);
+	return 0;
+}
+
+static int ver_spoof_open(struct inode *inode, struct file *file)
+{
+	if (is_target())
+		return single_open(file, ver_show, NULL);
+	if (ver_orig_ops_ptr && ver_orig_ops_ptr->proc_open)
+		return ver_orig_ops_ptr->proc_open(inode, file);
+	return -ENODEV;
+}
+
+static int ver_hook_install(void)
+{
+	struct proc_ops ops;
+
+	if (ver_hooked)
+		return 0;
+	if (!ver_buf || !ver_len)
+		return 0;	/* 假串未上传，静默跳过 */
+	ver_pde = find_proc_pde("version");
+	if (!ver_pde) {
+		pr_err("prop_spoof: 未找到 /proc/version 的 PDE\n");
+		return -ENOENT;
+	}
+	if (copy_from_kernel_nofault(&ops, &ver_pde->proc_ops,
+				     sizeof(ops))) {
+		pr_err("prop_spoof: 读取 version proc_ops 失败\n");
+		ver_pde = NULL;
+		return -EFAULT;
+	}
+	if (ops.proc_open == ver_spoof_open) {
+		ver_hooked = true;
+		return 0;
+	}
+	ver_orig_ops_ptr = ver_pde->proc_ops;
+	ver_spoof_ops = ops;
+	ver_spoof_ops.proc_open = ver_spoof_open;
+	WRITE_ONCE(ver_pde->proc_ops, &ver_spoof_ops);
+	ver_hooked = true;
+	pr_info("prop_spoof: version hook 安装成功 len=%zu\n", ver_len);
+	return 0;
+}
+
+static void ver_hook_remove(void)
+{
+	if (!ver_hooked || !ver_pde)
+		return;
+	WRITE_ONCE(ver_pde->proc_ops, ver_orig_ops_ptr);
+	ver_hooked = false;
+	ver_pde = NULL;
 }
 
 /* ==================================================================
@@ -1040,6 +1136,23 @@ static int lsm_file_open(struct file *file)
 {
 	struct prop_hook *h;
 	static int dbg_n;
+
+#ifdef PROP_SPOOF_TRACE
+	/* 调试检测版：对目标 uid 记录全部 open 路径（限 4000 条防爆日志） */
+	if (file && file->f_path.dentry && is_target()) {
+		static int trace_n;
+		char tp[224], *pp;
+		if (trace_n < 4000) {
+			pp = dentry_path_raw(file->f_path.dentry, tp, sizeof(tp));
+			if (!IS_ERR(pp)) {
+				trace_n++;
+				pr_info("prop_spoof: trace uid=%d open %s
+",
+					__kuid_val(current_uid()), pp);
+			}
+		}
+	}
+#endif
 
 	if (!file || !file->f_inode)
 		return 0;
@@ -1654,6 +1767,7 @@ static void __exit prop_spoof_exit(void)
 	lsm_remove();
 	prop_hooks_remove();
 	hook_remove();
+	ver_hook_remove();
 #ifdef PROP_SPOOF_BUILTIN
 	if (!nodes_hidden) {
 		remove_proc_entry("prop_spoof", NULL);
@@ -1665,6 +1779,9 @@ static void __exit prop_spoof_exit(void)
 	mutex_lock(&fake_lock);
 	vfree(fake_buf);
 	fake_buf = NULL;
+	vfree(ver_buf);
+	ver_buf = NULL;
+	ver_len = 0;
 	mutex_unlock(&fake_lock);
 	build_pat_free();
 }

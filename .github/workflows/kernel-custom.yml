@@ -92,6 +92,11 @@ on:
         required: false
         type: boolean
         default: false
+      prop_spoof_trace:
+        description: "prop_spoof 调试检测模式（按 uid 记录全部 open 路径）"
+        required: false
+        type: boolean
+        default: false
       use_prop_spoof:
         description: "集成 prop_spoof 属性伪装（内建，参数由配套模块注入）"
         required: false
@@ -136,3 +141,4 @@ jobs:
       enable_susfs: ${{ !inputs.cancel_susfs }}
       use_nomount: ${{ inputs.use_nomount || false }}
       use_prop_spoof: ${{ inputs.use_prop_spoof || false }}
+      prop_spoof_trace: ${{ inputs.prop_spoof_trace || false }}
