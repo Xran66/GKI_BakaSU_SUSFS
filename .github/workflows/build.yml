@@ -1170,7 +1170,7 @@ jobs:
             CLEAN_VERSION=$(echo "${{ inputs.version }}" | sed -E 's/^[0-9]+\.[0-9]+\.[0-9]+//')
             # 版本串伪装：Makefile SUBLEVEL 对齐 version 参数（如 6.12.96 源码 -> 显示 6.12.58）
             # 只影响版本字符串/vermagic 展示，不影响 KMI（由 KMI_TAG/branch 决定）
-            VSUB=$(echo "${{ inputs.version }}" | cut -d. -f3)
+            VSUB=$(echo "${{ inputs.version }}" | cut -d. -f3 | sed 's/[^0-9].*//')
             if [ -n "$VSUB" ] && [ -f ./common/Makefile ]; then
               CUR=$(awk '/^SUBLEVEL = / {print $3; exit}' ./common/Makefile)
               if [ -n "$CUR" ] && [ "$CUR" != "$VSUB" ]; then
