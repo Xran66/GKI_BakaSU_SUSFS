@@ -316,7 +316,7 @@ jobs:
 
             # "6.x.x 对应"：把 susfs 锁到与 os_patch_level 同时代的 commit
             # （2025-12 release 的内核是 6.12.58，当时 susfs 补丁即针对 6.12.58）
-            if [ "${{ inputs.use_prop_spoof }}" = "true" ] && [ "${{ inputs.os_patch_level }}" != "lts" ]; then
+            if [ "${{ inputs.use_prop_spoof }}" = "true" ] && echo "${{ inputs.os_patch_level }}" | grep -qE '^[0-9]{4}-[0-9]{2}$'; then
               PIN_DATE=$(echo "${{ inputs.os_patch_level }}" | awk -F- '{y=$1; m=$2+1; if (m>12){y++; m=1} printf "%04d-%02d-01", y, m}')
               PIN=$(git -C susfs4ksu rev-list -1 --before="$PIN_DATE" HEAD 2>/dev/null || true)
               if [ -n "$PIN" ]; then
@@ -362,7 +362,12 @@ jobs:
           # 克隆 GCC 工具链 (用于 5.x 内核)
           git clone https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-gnu-6.4.1.git gcc
 
-          FORMATTED_BRANCH="${{ inputs.android_version }}-${{ inputs.kernel_version }}-${{ inputs.os_patch_level }}"
+          if [ "${{ inputs.os_patch_level }}" = "head" ]; then
+            # head = ACK 主分支无后缀（common-android16-6.12），即 lunatellus elden-BakaSU 同源基线
+            FORMATTED_BRANCH="${{ inputs.android_version }}-${{ inputs.kernel_version }}"
+          else
+            FORMATTED_BRANCH="${{ inputs.android_version }}-${{ inputs.kernel_version }}-${{ inputs.os_patch_level }}"
+          fi
           echo "初始化 repo，分支: common-${FORMATTED_BRANCH}"
 
           retry 4 15 "$REPO" init --depth=1 -u https://android.googlesource.com/kernel/manifest -b "common-${FORMATTED_BRANCH}" --repo-rev=v2.16
