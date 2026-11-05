@@ -422,7 +422,13 @@ jobs:
         run: |
           set -euo pipefail
           SHORT="$SPOOF_PIN_SHORT"
-          FULL=$(git -C common rev-parse --verify "${SHORT}^{commit}") || { echo "::error::解析 $SHORT 失败"; exit 1; }
+          FULL=$(git -C common rev-parse --verify "${SHORT}^{commit}" 2>/dev/null) || true
+          if [ -z "${FULL:-}" ]; then
+            # 不在 lts 分支历史 -> 从远端按 sha/主线分支补拉
+            git -C common fetch --quiet origin "${SHORT}" 2>/dev/null || true
+            git -C common fetch --quiet origin "android16-6.12" 2>/dev/null || true
+            FULL=$(git -C common rev-parse --verify "${SHORT}^{commit}") || { echo "::error::解析 $SHORT 失败"; exit 1; }
+          fi
           echo "基线完整 sha: $FULL"
           MPATH=$(find "$GITHUB_WORKSPACE/.repo/manifests" -maxdepth 2 -name '*.xml' | head -1)
           python3 -c "import sys,xml.etree.ElementTree as ET; p='$MPATH'; sha='$FULL'; t=ET.parse(p); r=t.getroot(); ps=[x for x in r.iter('project') if x.get('name')=='kernel/common']; [x.set('revision',sha) for x in ps]; t.write(p,encoding='UTF-8',xml_declaration=True); print('manifest relocked',len(ps),sha); sys.exit(0 if len(ps)==1 else 1)" || { echo "::error::二次锁定失败"; exit 1; }
