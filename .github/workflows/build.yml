@@ -390,8 +390,17 @@ jobs:
           # prop_spoof 构建：把 kernel/common 锁定到真机内核基线 commit，
           # 避免 rolling LTS 分支把 6.6.139 编成最新子版本（vermagic 不匹配）
           if [ "${{ inputs.use_prop_spoof }}" = "true" ]; then
-            LIVE_COMMIT="5d4cdf2ffe450963010006be4b2f07e51702995b"
-            python3 -c "import sys,xml.etree.ElementTree as ET; p='$DEFAULT_MANIFEST_PATH'; sha='$LIVE_COMMIT'; t=ET.parse(p); r=t.getroot(); ps=[x for x in r.iter('project') if x.get('name')=='kernel/common']; [x.set('revision',sha) for x in ps]; t.write(p,encoding='UTF-8',xml_declaration=True); print('manifest patched',len(ps),sha); sys.exit(0 if len(ps)==1 else 1)" || { echo "::error::manifest 锁定 commit 失败"; exit 1; }
+            case "${{ inputs.android_version }}-${{ inputs.kernel_version }}" in
+              "android15-6.6")
+                LIVE_COMMIT="5d4cdf2ffe450963010006be4b2f07e51702995b"
+                python3 -c "import sys,xml.etree.ElementTree as ET; p='$DEFAULT_MANIFEST_PATH'; sha='$LIVE_COMMIT'; t=ET.parse(p); r=t.getroot(); ps=[x for x in r.iter('project') if x.get('name')=='kernel/common']; [x.set('revision',sha) for x in ps]; t.write(p,encoding='UTF-8',xml_declaration=True); print('manifest patched',len(ps),sha); sys.exit(0 if len(ps)==1 else 1)" || { echo "::error::manifest 锁定 commit 失败"; exit 1; }
+                ;;
+              "android16-6.12")
+                # 基线对齐 lunatellus elden-BakaSU 内核（6.12.96-android16-6）
+                echo "SPOOF_PIN_SHORT=gabad7aaa7f9f" >> "$GITHUB_ENV"
+                ;;
+              *) echo "prop_spoof: 该 KMI 未配置基线锁定，使用分支最新" ;;
+            esac
           fi
 
           retry 3 30 "$REPO" --trace sync -c "-j$(nproc --all)" --no-tags --fail-fast
@@ -403,6 +412,24 @@ jobs:
             fi
           fi
           echo "REMOTE_BRANCH=$REMOTE_BRANCH" >> $GITHUB_ENV
+
+      # ==================== 锁定 prop_spoof 基线（android16-6.12） ====================
+      # 首次 sync 拉到分支全历史后，把 lunatellus 版本串里的短 sha 解析成完整 sha，
+      # 修 manifest 后二次 sync，得到与 elden-BakaSU 内核一致的 6.12.96 基线。
+      - name: 锁定 prop_spoof 基线
+        if: ${{ inputs.use_prop_spoof && env.SPOOF_PIN_SHORT != '' }}
+        working-directory: ${{ env.KERNEL_ROOT }}
+        run: |
+          set -euo pipefail
+          SHORT="$SPOOF_PIN_SHORT"
+          FULL=$(git -C common rev-parse --verify "${SHORT}^{commit}") || { echo "::error::解析 $SHORT 失败"; exit 1; }
+          echo "基线完整 sha: $FULL"
+          MPATH=$(find "$GITHUB_WORKSPACE/.repo/manifests" -maxdepth 2 -name '*.xml' | head -1)
+          python3 -c "import sys,xml.etree.ElementTree as ET; p='$MPATH'; sha='$FULL'; t=ET.parse(p); r=t.getroot(); ps=[x for x in r.iter('project') if x.get('name')=='kernel/common']; [x.set('revision',sha) for x in ps]; t.write(p,encoding='UTF-8',xml_declaration=True); print('manifest relocked',len(ps),sha); sys.exit(0 if len(ps)==1 else 1)" || { echo "::error::二次锁定失败"; exit 1; }
+          "$GITHUB_WORKSPACE/git-repo/repo" sync -c --no-tags --fail-fast -j$(nproc --all)
+          SUB=$(awk '/^SUBLEVEL = / {print $3; exit}' common/Makefile)
+          echo "锁定后 SUBLEVEL=$SUB"
+          [ "$SUB" = "96" ] || { echo "::error::基线 sublevel=$SUB 预期 96"; exit 1; }
 
       # ==================== 伪装 /proc/config.gz（自动检测） ====================
       # 若仓库存在 config/stock_defconfig，则自动应用；不存在则跳过
