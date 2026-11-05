@@ -70,11 +70,11 @@ on:
       use_prop_spoof:
         description: "集成 prop_spoof 属性伪装（内建，参数由配套模块注入）"
         required: false
+        type: boolean
+        default: false
       prop_spoof_trace:
         description: "prop_spoof 调试检测模式：按目标 uid 记录全部 open 路径到内核日志"
         required: false
-        type: boolean
-        default: false
         type: boolean
         default: false
 
