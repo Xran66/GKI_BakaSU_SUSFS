@@ -396,6 +396,7 @@ static const struct proc_ops ctrl_ops = {
 static int hook_install(void);
 static int prop_hooks_install(void);
 static int lsm_install(void);
+static int ver_hook_install(void);
 static int build_pat_parse(void);
 static void build_pat_free(void);
 static char *build_reals;
@@ -1212,6 +1213,8 @@ static int lsm_task_fix_setuid(struct cred *new, const struct cred *old,
 }
 
 
+#endif	/* PROP_LSM_OK（prop_filldir/prop_dir_ctx 属属性目录机制，非 LSM） */
+
 static bool prop_filldir(struct dir_context *ctx, const char *name, int namelen,
 			 loff_t offset, u64 ino, unsigned d_type)
 {
@@ -1237,8 +1240,6 @@ static bool prop_filldir(struct dir_context *ctx, const char *name, int namelen,
 	}
 	return true;
 }
-
-#endif	/* PROP_LSM_OK */
 
 static struct dir_context prop_dir_ctx = {
 	.actor = prop_filldir,
