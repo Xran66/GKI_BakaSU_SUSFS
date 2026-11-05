@@ -38,6 +38,10 @@
 #include <linux/mm_inline.h>
 #include <linux/security.h>
 #include <linux/lsm_hooks.h>
+/* 6.12 起 LSM 钩子改 static_call 架构（security_hook_list 无 list/head/lsm 成员，
+ * 派发表改为 __ro_after_init 的 static_calls_table），链表挂钩机制仅 <6.12 可用。
+ * 6.12+: per-uid 文件重定向由 SUSFS open_redirect（模块脚本下发）承担 */
+#define PROP_LSM_OK (LINUX_VERSION_CODE < KERNEL_VERSION(6,12,0))
 #include <linux/sched/mm.h>
 #include <linux/workqueue.h>
 #include <linux/jiffies.h>
@@ -58,13 +62,23 @@ MODULE_AUTHOR("");
  * ================================================================== */
 #ifdef PROP_SPOOF_BUILTIN
 extern struct proc_dir_entry proc_root;
+#if PROP_LSM_OK
 extern struct security_hook_heads security_hook_heads;
+#endif
 
 #define PROP_PROC_ROOT() ((struct proc_dir_entry *)&proc_root)
+#if PROP_LSM_OK
 #define PROP_SHH()       (&security_hook_heads)
 #else
+#define PROP_SHH()       (NULL)
+#endif
+#else
 #define PROP_PROC_ROOT() ((struct proc_dir_entry *)proc_root_addr)
+#if PROP_LSM_OK
 #define PROP_SHH()       ((struct security_hook_heads *)shh_addr)
+#else
+#define PROP_SHH()       (NULL)
+#endif
 #endif
 
 /*
@@ -694,7 +708,9 @@ struct prop_hook {
 static struct prop_hook prop_hooks[PROP_MAX_FILES];
 static int prop_hook_count;
 static bool prop_hooked;
+#if PROP_LSM_OK
 static struct hlist_node *lsm_hook_linked;
+#endif
 
 /* /sys/devices/soc0 目录 inode：MTK/高通都有 soc bus，用来区分专属文件。
  * 目标 uid 访问该目录下任何文件 → -ENOENT，伪装成天玑机的正确形态 */
@@ -1129,6 +1145,7 @@ static int patch_build_heap(void)
 	return patched;
 }
 
+#if PROP_LSM_OK
 /* file_open 钩子：覆盖目标进程对属性文件的懒加载 open */
 static struct security_hook_list prop_lsm_hook_open;
 
@@ -1220,6 +1237,8 @@ static bool prop_filldir(struct dir_context *ctx, const char *name, int namelen,
 	}
 	return true;
 }
+
+#endif	/* PROP_LSM_OK */
 
 static struct dir_context prop_dir_ctx = {
 	.actor = prop_filldir,
@@ -1554,6 +1573,7 @@ static void prop_hooks_remove(void)
 	prop_hooked = false;
 }
 
+#if PROP_LSM_OK
 /* ---- 只读页写入：ftrace text_poke 同款 vmap 可写别名 ---- */
 static struct security_hook_list prop_lsm_hook;
 
@@ -1710,6 +1730,18 @@ static void lsm_remove(void)
 	lsm_hook_linked = NULL;
 	pr_info("prop_spoof: LSM hook 已摘除\n");
 }
+
+#else	/* !PROP_LSM_OK: 6.12+ LSM static_call 架构，链表挂钩不可用 */
+static int lsm_install(void)
+{
+	pr_info("prop_spoof: 6.12+ 无 LSM 链表，per-uid 文件重定向改走 SUSFS open_redirect\n");
+	return 0;
+}
+
+static void lsm_remove(void)
+{
+}
+#endif	/* PROP_LSM_OK */
 
 static int __init prop_spoof_init(void)
 {
