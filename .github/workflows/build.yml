@@ -314,15 +314,12 @@ jobs:
               fi
             fi
 
-            # susfs 锁定：所有构建都把 susfs4ksu 锁到 2026-10-29 的最后提交。
-            # 上游 11-02 之后的更新会掉 SELinux（domain 切换逻辑变更），在修复前不使用。
-            # （YYYY-MM 补丁级别维持"6.x.x 对应"时代锁，取两者中更早的那个）
+            # susfs 锁定：所有构建统一锁 2026-10-29 的最后提交。
+            # - 上游 11-02 之后会掉 SELinux（domain 切换变更），不用
+            # - 更老的 era 锁（如 2025-03）会得到旧式钩子补丁，缺 BakaSU 要求的
+            #   ksu_handle_* 新式钩子（00be2d47 之后才引入），inline_hook_check 会拦
             if [ "${{ inputs.use_prop_spoof }}" = "true" ]; then
               PIN_DATE="2026-10-30 00:00:00 +0800"
-              if echo "${{ inputs.os_patch_level }}" | grep -qE '^[0-9]{4}-[0-9]{2}$'; then
-                ERA=$(echo "${{ inputs.os_patch_level }}" | awk -F- '{y=$1; m=$2+1; if (m>12){y++; m=1} printf "%04d-%02d-01 00:00:00 +0800", y, m}')
-                if [[ "$ERA" < "$PIN_DATE" ]]; then PIN_DATE="$ERA"; fi
-              fi
               PIN=$(git -C susfs4ksu rev-list -1 --before="$PIN_DATE" HEAD 2>/dev/null || true)
               if [ -n "$PIN" ]; then
                 git -C susfs4ksu checkout --quiet "$PIN"
