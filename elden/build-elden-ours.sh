@@ -195,7 +195,7 @@ integrate() {
         echo "prop_spoof: integrated (builtin, inert until cfg start)"
     fi
     if [[ $ADD_LINEAGEHIDE == 1 ]]; then
-        bash "$ROOT/lineage_hide/scripts/patch-kernel.sh" "$common"
+        bash "$WORK/lineage_hide/scripts/patch-kernel.sh" "$common"
         echo "Lineage_Hide: procfs scrub patches applied"
     fi
 }
