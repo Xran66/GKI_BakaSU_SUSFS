@@ -24,6 +24,10 @@ SUSFS_SINCE=${SUSFS_SINCE:-2026-10-27}
 # ADD_PANICDEBUG=1 : bootloop 调试模式——挂死转 panic（softlockup/hung_task）+ panic 10s 后
 # 自动热重启（RAM 不清），ramoops 保留死机前内核日志，进 recovery 读 /sys/fs/pstore。
 ADD_PANICDEBUG=${ADD_PANICDEBUG:-0}
+# GKI_BRANCH：内核 manifest 分支。默认跟 HEAD（11 月起 KMI 代数已跳到 android16-7，
+# 与 10 月 era 的 vendor 模块不兼容会挂死）；设为 common-android16-6.12-2026-10
+# 可锁定回 android16-6 代（与 lunatellus 1101 能开机版本同 era）。
+GKI_BRANCH=${GKI_BRANCH:-common-android16-6.12}
 
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
@@ -68,7 +72,7 @@ sync_sources() {
     (
         cd "$KERNEL"
         repo init -q -u https://android.googlesource.com/kernel/manifest \
-            -b common-android16-6.12 --depth=1
+            -b "$GKI_BRANCH" --depth=1
         repo sync -c -d -j"$JOBS" --no-tags --no-clone-bundle --no-verify --no-auto-gc
     )
     sync_git "$WORK/BakaSU" https://github.com/Baka-SU/BakaSU.git main true
@@ -130,9 +134,17 @@ integrate() {
     printf '\nobj-$(CONFIG_KSU) += bakasu/kernel/\n' >> "$common/drivers/Makefile"
     cp "$ROOT/kernel.fragment" "$common/arch/arm64/configs/elden.fragment"
     if [[ $ADD_PANICDEBUG == 1 ]]; then
-        printf '\n# Xran66 bootloop debug: turn hangs into panics so ramoops captures the log\nCONFIG_BOOTPARAM_SOFTLOCKUP_PANIC=y\nCONFIG_BOOTPARAM_HUNG_TASK_PANIC=y\nCONFIG_PANIC_TIMEOUT=10\nCONFIG_PANIC_ON_OOPS=y\n' \
-            >> "$common/arch/arm64/configs/elden.fragment"
-        echo "panicdebug: fragment patched"
+        # 注意：fragment 方式（BOOTPARAM_*）会被 ACK 构建的 KMI 配置校验丢弃（已实测），
+        # 因此直接改源码默认值，确保 panic 后 10s 自动热重启（RAM 不清，ramoops 留日志）。
+        sed -i 's/^int panic_timeout = CONFIG_PANIC_TIMEOUT;/int panic_timeout = 10;/' \
+            "$common/kernel/panic.c"
+        sed -i 's/CONFIG_BOOTPARAM_SOFTLOCKUP_PANIC_VALUE/1/g' "$common/kernel/watchdog.c"
+        sed -i 's/CONFIG_BOOTPARAM_HUNG_TASK_PANIC_VALUE/1/g' "$common/kernel/hung_task.c"
+        grep -q '^int panic_timeout = 10;' "$common/kernel/panic.c" ||
+            echo "WARN: panic.c panic_timeout patch not applied"
+        grep -q 'softlockup_panic.*= 1' "$common/kernel/watchdog.c" ||
+            echo "WARN: watchdog.c softlockup_panic patch not applied"
+        echo "panicdebug: source patched (panic_timeout=10, softlockup/hung_task panic on)"
     fi
     printf '\nexports_files(["arch/arm64/configs/elden.fragment"])\n' >> "$common/BUILD.bazel"
     local patch
