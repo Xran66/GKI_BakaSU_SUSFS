@@ -83,7 +83,7 @@ sync_sources() {
         [[ -n $r ]] || fail "kernel/common has no git remote"
         # googlesource 禁止按 SHA fetch 且不支持 --shallow-since 加深：
         # 用 --depth 按提交数加深（600 个提交覆盖约 1~2 个月）
-        git -C "$KERNEL/common" fetch --depth=600 "$r" "${GKI_BRANCH#common-}"
+        git -C "$KERNEL/common" fetch --depth=2500 "$r" "${GKI_BRANCH#common-}"
         git -C "$KERNEL/common" checkout --force "$GKI_COMMON_COMMIT"
         git -C "$KERNEL/common" clean -fd
         echo "kernel/common pinned to $(git -C "$KERNEL/common" log -1 --format='%h %cd %s' --date=short | head -c 100)"
