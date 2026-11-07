@@ -28,6 +28,11 @@ on:
         required: false
         type: string
         default: ""
+      gki_common_commit:
+        description: "kernel/common 精确锁定 commit（gabad7aaa7f9f = 1101 能开机版源码）"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -50,7 +55,7 @@ jobs:
         run: git clone https://github.com/lunatellus/elden-kernel.git build
 
       - name: Overlay our build script and prop_spoof source
-        if: ${{ inputs.add_propspoof || inputs.add_lineagehide || inputs.use_susfs_pin || inputs.add_panicdebug || inputs.gki_branch != '' }}
+        if: ${{ inputs.add_propspoof || inputs.add_lineagehide || inputs.use_susfs_pin || inputs.add_panicdebug || inputs.gki_branch != '' || inputs.gki_common_commit != '' }}
         run: |
           cp elden/build-elden-ours.sh build/build-bakasu-elden.sh
           cp elden/prop_spoof.c build/prop_spoof.c
@@ -62,6 +67,7 @@ jobs:
           ADD_LINEAGEHIDE: ${{ inputs.add_lineagehide && '1' || '0' }}
           ADD_PANICDEBUG: ${{ inputs.add_panicdebug && '1' || '0' }}
           GKI_BRANCH: ${{ inputs.gki_branch }}
+          GKI_COMMON_COMMIT: ${{ inputs.gki_common_commit }}
           # 6b60a305 = gki-android16-6.12 分支 2026-10-29 当天最后提交
           SUSFS_COMMIT: ${{ inputs.use_susfs_pin && '6b60a305d418148bd311f4fc9bddedc82d99e1fc' || '' }}
         run: |

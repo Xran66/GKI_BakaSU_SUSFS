@@ -28,6 +28,9 @@ ADD_PANICDEBUG=${ADD_PANICDEBUG:-0}
 # 与 10 月 era 的 vendor 模块不兼容会挂死）；设为 common-android16-6.12-2026-10
 # 可锁定回 android16-6 代（与 lunatellus 1101 能开机版本同 era）。
 GKI_BRANCH=${GKI_BRANCH:-common-android16-6.12}
+# GKI_COMMON_COMMIT：repo 同步后把 kernel/common 精确 checkout 到指定 commit。
+# gabad7aaa7f9f = lunatellus 1101 能开机版本的确切源码（android16-6 / KMI gen 6 era）。
+GKI_COMMON_COMMIT=${GKI_COMMON_COMMIT:-}
 
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
@@ -75,6 +78,12 @@ sync_sources() {
             -b "$GKI_BRANCH" --depth=1
         repo sync -c -d -j"$JOBS" --no-tags --no-clone-bundle --no-verify --no-auto-gc
     )
+    if [[ -n $GKI_COMMON_COMMIT ]]; then
+        git -C "$KERNEL/common" fetch origin "$GKI_COMMON_COMMIT"
+        git -C "$KERNEL/common" checkout --force "$GKI_COMMON_COMMIT"
+        git -C "$KERNEL/common" clean -fd
+        echo "kernel/common pinned to $(git -C "$KERNEL/common" log -1 --format='%h %cd %s' --date=short | head -c 100)"
+    fi
     sync_git "$WORK/BakaSU" https://github.com/Baka-SU/BakaSU.git main true
     sync_git "$WORK/susfs" https://gitlab.com/simonpunk/susfs4ksu.git gki-android16-6.12
     if [[ -n $SUSFS_COMMIT ]]; then
