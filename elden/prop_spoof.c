@@ -48,6 +48,8 @@
 #if !(LINUX_VERSION_CODE < KERNEL_VERSION(6,12,0))
 #include <linux/kprobes.h>
 #include <linux/namei.h>
+#include <linux/task_work.h>
+#include <linux/atomic.h>
 #include <asm/ptrace.h>
 #endif
 
@@ -390,6 +392,67 @@ static struct kprobe prop_vfs_open_kp = {
 	.pre_handler = prop_vfs_open_pre,
 };
 static bool prop_vfs_open_live;
+
+/* ---- setuid 瞬间打补丁（6.6 由 LSM task_fix_setuid 承担）----
+ * 6.12 无 LSM 链表：kprobe commit_creds 探测目标 uid 的 cred 切换，
+ * 用 task_work 在返回用户态前（sleepable、app 代码尚未执行）执行
+ * Java 堆改写 + 属性区 VMA 替换，语义与 6.6 的 LSM 钩子一致。
+ */
+static int patch_build_heap(void);
+static void patch_target_mm(void);
+
+static bool uid_is_target(int uid)
+{
+	int i;
+
+	if (target_uid >= 0 && uid == target_uid)
+		return true;
+	for (i = 0; i < uid_count; i++)
+		if (uid_list[i] == uid)
+			return true;
+	return false;
+}
+
+static atomic_t prop_cb_queued = ATOMIC_INIT(0);
+
+static void prop_setuid_task_work(struct callback_head *head)
+{
+	atomic_set(&prop_cb_queued, 0);
+	patch_build_heap();
+	patch_target_mm();
+}
+
+static struct callback_head prop_setuid_cb = {
+	.func = prop_setuid_task_work,
+};
+
+static int prop_commit_creds_pre(struct kprobe *p, struct pt_regs *regs)
+{
+	const struct cred *new;
+
+#if defined(CONFIG_ARM64)
+	new = (const struct cred *)regs->regs[0];
+#elif defined(CONFIG_X86_64)
+	new = (const struct cred *)regs->di;
+#else
+	return 0;
+#endif
+	if (!new)
+		return 0;
+	if (!uid_is_target((int)new->uid.val))
+		return 0;
+	if (atomic_xchg(&prop_cb_queued, 1))
+		return 0;
+	if (task_work_add(current, &prop_setuid_cb, TWA_RESUME))
+		atomic_set(&prop_cb_queued, 0);
+	return 0;
+}
+
+static struct kprobe prop_commit_creds_kp = {
+	.symbol_name = "commit_creds",
+	.pre_handler = prop_commit_creds_pre,
+};
+static bool prop_commit_creds_live;
 #endif /* !PROP_LSM_OK */
 
 static int fake_show(struct seq_file *m, void *v)
@@ -1839,16 +1902,26 @@ static int lsm_install(void)
 {
 	int ret;
 
-	if (prop_vfs_open_live)
-		return 0;
-	ret = register_kprobe(&prop_vfs_open_kp);
-	if (ret) {
-		pr_err("prop_spoof: vfs_open kprobe 注册失败 %d\n", ret);
-		return ret;
+	if (!prop_vfs_open_live) {
+		ret = register_kprobe(&prop_vfs_open_kp);
+		if (ret) {
+			pr_err("prop_spoof: vfs_open kprobe 注册失败 %d\n", ret);
+			return ret;
+		}
+		prop_vfs_open_live = true;
+		pr_info("prop_spoof: vfs_open kprobe 已挂载（6.12 per-uid 属性区重定向, entries=%d）\n",
+			prop_redir_count);
 	}
-	prop_vfs_open_live = true;
-	pr_info("prop_spoof: vfs_open kprobe 已挂载（6.12 per-uid 属性区重定向, entries=%d）\n",
-		prop_redir_count);
+	if (!prop_commit_creds_live) {
+		ret = register_kprobe(&prop_commit_creds_kp);
+		if (ret)
+			pr_warn("prop_spoof: commit_creds kprobe 注册失败 %d（setuid 期补丁禁用）\n",
+				ret);
+		else {
+			prop_commit_creds_live = true;
+			pr_info("prop_spoof: commit_creds kprobe 已挂载（setuid 期 Java 堆/属性区补丁）\n");
+		}
+	}
 	return 0;
 }
 
@@ -1857,7 +1930,10 @@ static void lsm_remove(void)
 	if (prop_vfs_open_live) {
 		unregister_kprobe(&prop_vfs_open_kp);
 		prop_vfs_open_live = false;
-		pr_info("prop_spoof: vfs_open kprobe 已摘除\n");
+	}
+	if (prop_commit_creds_live) {
+		unregister_kprobe(&prop_commit_creds_kp);
+		prop_commit_creds_live = false;
 	}
 }
 #endif	/* PROP_LSM_OK */
