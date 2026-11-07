@@ -79,7 +79,9 @@ sync_sources() {
         repo sync -c -d -j"$JOBS" --no-tags --no-clone-bundle --no-verify --no-auto-gc
     )
     if [[ -n $GKI_COMMON_COMMIT ]]; then
-        git -C "$KERNEL/common" fetch origin "$GKI_COMMON_COMMIT"
+        local r=$(git -C "$KERNEL/common" remote | head -1)
+        [[ -n $r ]] || fail "kernel/common has no git remote"
+        git -C "$KERNEL/common" fetch "$r" "$GKI_COMMON_COMMIT"
         git -C "$KERNEL/common" checkout --force "$GKI_COMMON_COMMIT"
         git -C "$KERNEL/common" clean -fd
         echo "kernel/common pinned to $(git -C "$KERNEL/common" log -1 --format='%h %cd %s' --date=short | head -c 100)"
