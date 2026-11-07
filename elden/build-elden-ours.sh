@@ -129,7 +129,15 @@ integrate() {
     printf '\nexports_files(["arch/arm64/configs/elden.fragment"])\n' >> "$common/BUILD.bazel"
     local patch
     for patch in "$ROOT"/patches/*.patch; do
-        apply_patch "$common" "$patch"
+        if [[ -n $SUSFS_COMMIT && $(basename -- "$patch") == susfs-compat.patch ]]; then
+            # susfs 锁定 10-29 时跳过 fs/susfs.c hunk：它按 tip 版文件布局写（creds 函数在 172 行），
+            # 10-29 版这两个函数在文件头部且有内部调用者，不存在 unused 告警，无需 #ifdef 包裹。
+            # read_write.c（新式 read hook 签名）和 fdinfo.c hunk 仍然需要，保留应用。
+            git -C "$common" apply --check --exclude=fs/susfs.c "$patch"
+            git -C "$common" apply --exclude=fs/susfs.c "$patch"
+        else
+            apply_patch "$common" "$patch"
+        fi
     done
     write_version "$WORK/BakaSU" "$common/drivers/bakasu/kernel/elden-version.mk"
     if [[ $ADD_PROPSPOOF == 1 ]]; then
