@@ -419,6 +419,11 @@ jobs:
                 LIVE_COMMIT="5d4cdf2ffe450963010006be4b2f07e51702995b"
                 python3 -c "import sys,xml.etree.ElementTree as ET; p='$DEFAULT_MANIFEST_PATH'; sha='$LIVE_COMMIT'; t=ET.parse(p); r=t.getroot(); ps=[x for x in r.iter('project') if x.get('name')=='kernel/common']; [x.set('revision',sha) for x in ps]; t.write(p,encoding='UTF-8',xml_declaration=True); print('manifest patched',len(ps),sha); sys.exit(0 if len(ps)==1 else 1)" || { echo "::error::manifest 锁定 commit 失败"; exit 1; }
                 ;;
+              "android16-6.12")
+                # gen-6 era 发布 tag（KMI gen 7 后 gabad7aaa 从分支历史不可达，tag 是唯一入口）
+                LIVE_COMMIT="refs/tags/android16-6.12.96_r00"
+                python3 -c "import sys,xml.etree.ElementTree as ET; p='$DEFAULT_MANIFEST_PATH'; sha='$LIVE_COMMIT'; t=ET.parse(p); r=t.getroot(); ps=[x for x in r.iter('project') if x.get('name')=='kernel/common']; [x.set('revision',sha) for x in ps]; t.write(p,encoding='UTF-8',xml_declaration=True); print('manifest patched',len(ps),sha); sys.exit(0 if len(ps)==1 else 1)" || { echo "::error::manifest 锁定 tag 失败"; exit 1; }
+                ;;
               *) echo "prop_spoof: 该 KMI 未配置基线锁定，使用分支最新" ;;
             esac
           fi
