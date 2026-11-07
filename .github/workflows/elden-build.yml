@@ -1,0 +1,50 @@
+name: Build Elden kernel (Xran66)
+
+on:
+  workflow_dispatch:
+    inputs:
+      add_lineagehide:
+        description: "应用 Lineage_Hide procfs 清洗补丁（bootloop 嫌疑，默认关）"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y repo git python3 zip unzip rsync bc flex bison build-essential libssl-dev libelf-dev zlib1g-dev zstd openssl
+
+      - name: Clone lunatellus elden-kernel build project
+        run: git clone https://github.com/lunatellus/elden-kernel.git build
+
+      - name: Overlay our build script and prop_spoof source
+        run: |
+          cp elden/build-elden-ours.sh build/build-bakasu-elden.sh
+          cp elden/prop_spoof.c build/prop_spoof.c
+          chmod 755 build/build-bakasu-elden.sh
+
+      - name: Build AVB-signed boot and AnyKernel3 package
+        env:
+          ADD_PROPSPOOF: "1"
+          ADD_LINEAGEHIDE: ${{ inputs.add_lineagehide && '1' || '0' }}
+        run: |
+          cd build
+          JOBS=8 ./build-bakasu-elden.sh
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: elden-kernel-xran66
+          path: build/out/
+          if-no-files-found: error
