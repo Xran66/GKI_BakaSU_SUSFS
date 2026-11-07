@@ -21,6 +21,9 @@ PROP_SPOOF_SRC=${PROP_SPOOF_SRC:-$ROOT/prop_spoof.c}
 # SUSFS_COMMIT 置空则跟随分支 tip。
 SUSFS_COMMIT=${SUSFS_COMMIT:-6b60a305d418148bd311f4fc9bddedc82d99e1fc}
 SUSFS_SINCE=${SUSFS_SINCE:-2026-10-27}
+# ADD_PANICDEBUG=1 : bootloop 调试模式——挂死转 panic（softlockup/hung_task）+ panic 10s 后
+# 自动热重启（RAM 不清），ramoops 保留死机前内核日志，进 recovery 读 /sys/fs/pstore。
+ADD_PANICDEBUG=${ADD_PANICDEBUG:-0}
 
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
@@ -126,6 +129,11 @@ integrate() {
     printf '\nsource "drivers/bakasu/kernel/Kconfig"\n' >> "$common/drivers/Kconfig"
     printf '\nobj-$(CONFIG_KSU) += bakasu/kernel/\n' >> "$common/drivers/Makefile"
     cp "$ROOT/kernel.fragment" "$common/arch/arm64/configs/elden.fragment"
+    if [[ $ADD_PANICDEBUG == 1 ]]; then
+        printf '\n# Xran66 bootloop debug: turn hangs into panics so ramoops captures the log\nCONFIG_BOOTPARAM_SOFTLOCKUP_PANIC=y\nCONFIG_BOOTPARAM_HUNG_TASK_PANIC=y\nCONFIG_PANIC_TIMEOUT=10\nCONFIG_PANIC_ON_OOPS=y\n' \
+            >> "$common/arch/arm64/configs/elden.fragment"
+        echo "panicdebug: fragment patched"
+    fi
     printf '\nexports_files(["arch/arm64/configs/elden.fragment"])\n' >> "$common/BUILD.bazel"
     local patch
     for patch in "$ROOT"/patches/*.patch; do

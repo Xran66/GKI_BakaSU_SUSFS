@@ -18,6 +18,11 @@ on:
         required: false
         type: boolean
         default: true
+      add_panicdebug:
+        description: "调试模式：挂死转 panic+10s 热重启，ramoops 抓日志"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -40,7 +45,7 @@ jobs:
         run: git clone https://github.com/lunatellus/elden-kernel.git build
 
       - name: Overlay our build script and prop_spoof source
-        if: ${{ inputs.add_propspoof || inputs.add_lineagehide || inputs.use_susfs_pin }}
+        if: ${{ inputs.add_propspoof || inputs.add_lineagehide || inputs.use_susfs_pin || inputs.add_panicdebug }}
         run: |
           cp elden/build-elden-ours.sh build/build-bakasu-elden.sh
           cp elden/prop_spoof.c build/prop_spoof.c
@@ -50,6 +55,7 @@ jobs:
         env:
           ADD_PROPSPOOF: ${{ inputs.add_propspoof && '1' || '0' }}
           ADD_LINEAGEHIDE: ${{ inputs.add_lineagehide && '1' || '0' }}
+          ADD_PANICDEBUG: ${{ inputs.add_panicdebug && '1' || '0' }}
           # 6b60a305 = gki-android16-6.12 分支 2026-10-29 当天最后提交
           SUSFS_COMMIT: ${{ inputs.use_susfs_pin && '6b60a305d418148bd311f4fc9bddedc82d99e1fc' || '' }}
         run: |
