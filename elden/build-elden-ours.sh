@@ -81,9 +81,12 @@ sync_sources() {
     if [[ -n $GKI_COMMON_COMMIT ]]; then
         local r=$(git -C "$KERNEL/common" remote | head -1)
         [[ -n $r ]] || fail "kernel/common has no git remote"
-        # googlesource 禁止按 SHA fetch 且不支持 --shallow-since 加深：
-        # 用 --depth 按提交数加深（600 个提交覆盖约 1~2 个月）
-        git -C "$KERNEL/common" fetch --depth=2500 "$r" "${GKI_BRANCH#common-}"
+        # googlesource 禁止按 SHA fetch 且不支持 --shallow-since：先按提交数加深，
+        # 锁定点仍取不到就 unshallow 拉全量（自适应，一次跑通）
+        local branch=${GKI_BRANCH#common-}
+        git -C "$KERNEL/common" fetch --depth=6000 "$r" "$branch" || true
+        git -C "$KERNEL/common" cat-file -e "$GKI_COMMON_COMMIT^{commit}" 2>/dev/null ||
+            git -C "$KERNEL/common" fetch --unshallow "$r" "$branch"
         git -C "$KERNEL/common" checkout --force "$GKI_COMMON_COMMIT"
         git -C "$KERNEL/common" clean -fd
         echo "kernel/common pinned to $(git -C "$KERNEL/common" log -1 --format='%h %cd %s' --date=short | head -c 100)"
