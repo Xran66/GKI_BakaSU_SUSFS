@@ -195,7 +195,7 @@ static void egl_ns_remember(void)
 /* 目标 app 专用：unshare 私有 mount ns + bind mount 假 EGL 目录。
  * 全程 copy_from_kernel_nofault 级别的防御不可用（mount API 无此形态），
  * 依赖：地址为固定路径、内核 API 返回错误不崩；CAP 由 init_cred 提供。 */
-static void egl_shadow_mount(void)
+__maybe_unused static void egl_shadow_mount(void)
 {
 	const struct cred *old;
 	struct path dst;
@@ -716,7 +716,7 @@ static struct hlist_node *lsm_hook_linked;
 /* /sys/devices/soc0 目录 inode：MTK/高通都有 soc bus，用来区分专属文件。
  * 目标 uid 访问该目录下任何文件 → -ENOENT，伪装成天玑机的正确形态 */
 
-static bool uid_match_current(void)
+__maybe_unused static bool uid_match_current(void)
 {
 	int i, uid = (int)from_kuid_munged(&init_user_ns, current_uid());
 
@@ -766,7 +766,7 @@ static ssize_t prop_lazy_read_iter(struct kiocb *iocb, struct iov_iter *to)
 }
 
 /* 目标进程的属性区 vma → 假文件，并清旧页（重 fault 出假内容） */
-static void patch_target_mm(void)
+__maybe_unused static void patch_target_mm(void)
 {
 	struct mm_struct *mm = current->mm;
 	struct vma_iterator vmi;
@@ -1033,7 +1033,7 @@ static int build_patch_one(unsigned long data_addr, int p, int is_u16)
  * 逐页 copy_from_user：reserved 区域未驻留页读缺页只映射共享零页（不分配
  * 物理内存），全零页直接跳过。字符串对象页必含非零 klass 指针。
  * copy_to_user 写共享页触发 COW，天然按 app 隔离。返回改写数。 */
-static int patch_build_heap(void)
+__maybe_unused static int patch_build_heap(void)
 {
 	struct vma_iterator vmi;
 	struct vm_area_struct *vma;
