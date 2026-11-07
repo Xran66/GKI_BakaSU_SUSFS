@@ -154,6 +154,18 @@ integrate() {
     cp "$WORK/susfs/kernel_patches/fs/susfs.c" "$common/fs/susfs.c"
     cp "$WORK/susfs/kernel_patches/include/linux/"susfs*.h "$common/include/linux/"
     mkdir -p "$common/drivers/bakasu"
+    if [[ $ADD_LINEAGEHIDE == 1 ]]; then
+        # KSU selinux_hide 加固必须在 git archive 之前打并提交：
+        # 堵住 selinuxfs context/access/setprocattr 三条回退探针路径
+        # （对应用探测 u:r:adbroot:s0 / su:s0 返回 -EINVAL）
+        bash "$WORK/lineage_hide/scripts/selinux_hide_patch.sh" "$WORK/BakaSU" ||
+            fail "Lineage_Hide: selinux_hide_patch.sh 失败"
+        git -C "$WORK/BakaSU" add -A
+        git -C "$WORK/BakaSU" -c user.email=ci@localhost -c user.name=ci \
+            commit -q -m "lineage_hide: harden ksu selinux_hide probes" ||
+            fail "Lineage_Hide: BakaSU commit 失败"
+        echo "Lineage_Hide: KSU selinux_hide hardened (adbroot/su probes blocked)"
+    fi
     git -C "$WORK/BakaSU" archive HEAD kernel uapi LICENSE |
         tar -x -C "$common/drivers/bakasu"
     printf '\nsource "drivers/bakasu/kernel/Kconfig"\n' >> "$common/drivers/Kconfig"
