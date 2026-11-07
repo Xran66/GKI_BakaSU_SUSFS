@@ -8,6 +8,11 @@ on:
         required: false
         type: boolean
         default: false
+      use_susfs_pin:
+        description: "SUSFS 锁定到 2026-10-29 最后提交（防止 11 月上游掉 SELinux）"
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -39,6 +44,8 @@ jobs:
         env:
           ADD_PROPSPOOF: "1"
           ADD_LINEAGEHIDE: ${{ inputs.add_lineagehide && '1' || '0' }}
+          # 6b60a305 = gki-android16-6.12 分支 2026-10-29 当天最后提交
+          SUSFS_COMMIT: ${{ inputs.use_susfs_pin && '6b60a305d418148bd311f4fc9bddedc82d99e1fc' || '' }}
         run: |
           cd build
           JOBS=8 ./build-bakasu-elden.sh

@@ -16,6 +16,11 @@ JOBS=${JOBS:-8}
 ADD_PROPSPOOF=${ADD_PROPSPOOF:-1}
 ADD_LINEAGEHIDE=${ADD_LINEAGEHIDE:-0}
 PROP_SPOOF_SRC=${PROP_SPOOF_SRC:-$ROOT/prop_spoof.c}
+# SUSFS 锁定：11-01/11-02 的 selinux_hide 重构 + priority_uid_filter 会导致掉 SELinux，
+# 默认锁 2026-10-29 当天最后提交 6b60a305（KernelSU: Fix compiler error）。
+# SUSFS_COMMIT 置空则跟随分支 tip。
+SUSFS_COMMIT=${SUSFS_COMMIT:-6b60a305d418148bd311f4fc9bddedc82d99e1fc}
+SUSFS_SINCE=${SUSFS_SINCE:-2026-10-27}
 
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
@@ -65,6 +70,12 @@ sync_sources() {
     )
     sync_git "$WORK/BakaSU" https://github.com/Baka-SU/BakaSU.git main true
     sync_git "$WORK/susfs" https://gitlab.com/simonpunk/susfs4ksu.git gki-android16-6.12
+    if [[ -n $SUSFS_COMMIT ]]; then
+        # shallow tip 之后补拉锁定点附近的浅历史再 checkout
+        git -C "$WORK/susfs" fetch --shallow-since="$SUSFS_SINCE" origin gki-android16-6.12
+        git -C "$WORK/susfs" checkout --force "$SUSFS_COMMIT"
+        echo "susfs: pinned to $(git -C "$WORK/susfs" log -1 --format='%h %cd %s' --date=short)"
+    fi
     sync_git "$WORK/AnyKernel3" https://github.com/osm0sis/AnyKernel3.git master
     git -C "$WORK/AnyKernel3" fetch --depth=1 origin \
         +refs/heads/arm64-tools:refs/remotes/origin/arm64-tools
