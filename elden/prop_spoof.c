@@ -45,6 +45,11 @@
 #include <linux/sched/mm.h>
 #include <linux/workqueue.h>
 #include <linux/jiffies.h>
+#if !(LINUX_VERSION_CODE < KERNEL_VERSION(6,12,0))
+#include <linux/kprobes.h>
+#include <linux/namei.h>
+#include <asm/ptrace.h>
+#endif
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("");
@@ -318,6 +323,75 @@ static void parse_target_uids(void)
 	}
 }
 
+/* ==================================================================
+ * 6.12+ 属性区 per-uid 重定向（LSM 链表不可用时的替代方案）
+ * ------------------------------------------------------------------
+ * 原理：kprobe 挂 vfs_open()，若打开的是 /dev/__properties__/<ctx>
+ * 且当前进程命中目标 uid，则把 path->dentry/mnt 换成假表文件的
+ * （cfg "redir <ctx名> <假文件路径>" 预先把假文件 kern_path 固定）。
+ * open 完成后 fd 指向假文件，bionic 的 mmap 自然读到假内容。
+ * 假文件的 SELinux label 需由脚本 chcon 成同名 ctx，否则应用 open
+ * 会被拒。
+ * ================================================================== */
+#if !PROP_LSM_OK
+#define PROP_MAX_REDIR 512
+#define PROP_CTX_PREFIX "u:object_r:"
+
+struct prop_redir {
+	char name[80];
+	struct path path;
+};
+
+static struct prop_redir *prop_redirs;
+static int prop_redir_count;
+
+static struct prop_redir *prop_redir_lookup(const char *name)
+{
+	int i;
+
+	if (!prop_redirs)
+		return NULL;
+	for (i = 0; i < prop_redir_count; i++)
+		if (!strcmp(prop_redirs[i].name, name))
+			return &prop_redirs[i];
+	return NULL;
+}
+
+static int prop_vfs_open_pre(struct kprobe *p, struct pt_regs *regs)
+{
+	struct path *pp;
+	const char *nm;
+	struct prop_redir *r;
+
+#if defined(CONFIG_ARM64)
+	pp = (struct path *)regs->regs[0];
+#elif defined(CONFIG_X86_64)
+	pp = (struct path *)regs->di;
+#else
+	pp = NULL;
+#endif
+	if (!pp || !pp->dentry || !pp->mnt)
+		return 0;
+	nm = pp->dentry->d_name.name;
+	if (!nm || strncmp(nm, PROP_CTX_PREFIX, sizeof(PROP_CTX_PREFIX) - 1))
+		return 0;
+	if (!is_target())
+		return 0;
+	r = prop_redir_lookup(nm);
+	if (!r)
+		return 0;
+	((struct path *)pp)->dentry = r->path.dentry;
+	((struct path *)pp)->mnt = r->path.mnt;
+	return 0;
+}
+
+static struct kprobe prop_vfs_open_kp = {
+	.symbol_name = "vfs_open",
+	.pre_handler = prop_vfs_open_pre,
+};
+static bool prop_vfs_open_live;
+#endif /* !PROP_LSM_OK */
+
 static int fake_show(struct seq_file *m, void *v)
 {
 	mutex_lock(&fake_lock);
@@ -325,9 +399,7 @@ static int fake_show(struct seq_file *m, void *v)
 		seq_write(m, fake_buf, fake_len);
 	mutex_unlock(&fake_lock);
 	return 0;
-}
-
-static int spoof_open(struct inode *inode, struct file *file)
+}static int spoof_open(struct inode *inode, struct file *file)
 {
 	if (is_target())
 		return single_open(file, fake_show, NULL);
@@ -506,6 +578,36 @@ static ssize_t cfg_write(struct file *f, const char __user *ub, size_t n,
 				pr_info("prop_spoof: verfile 已更新 len=%zu\n",
 					ver_len);
 			}
+		} else if (!strncmp(line, "redir ", 6)) {
+#if !PROP_LSM_OK
+			/* redir <ctx文件名> <假表文件绝对路径>：登记 per-uid 属性区重定向 */
+			char *sp = strchr(line + 6, ' ');
+			struct path p;
+
+			if (!sp)
+				continue;
+			*sp = '\0';
+			if (!prop_redirs) {
+				prop_redirs = vzalloc(sizeof(*prop_redirs) *
+						      PROP_MAX_REDIR);
+				if (!prop_redirs) {
+					pr_err("prop_spoof: redir 表分配失败\n");
+					continue;
+				}
+			}
+			if (prop_redir_count >= PROP_MAX_REDIR) {
+				pr_warn("prop_spoof: redir 表满，忽略 %s\n", line + 6);
+				continue;
+			}
+			if (kern_path(sp + 1, LOOKUP_FOLLOW, &p)) {
+				pr_warn("prop_spoof: redir 假文件不存在 %s\n", sp + 1);
+				continue;
+			}
+			strscpy(prop_redirs[prop_redir_count].name, line + 6,
+				sizeof(prop_redirs[0].name));
+			prop_redirs[prop_redir_count].path = p;
+			prop_redir_count++;
+#endif
 		} else if (!strcmp(line, "hide")) {
 			schedule_delayed_work(&prop_hide_work, 2 * HZ);
 			pr_info("prop_spoof: cfg hide 已排程\n");
@@ -1735,12 +1837,28 @@ static void lsm_remove(void)
 #else	/* !PROP_LSM_OK: 6.12+ LSM static_call 架构，链表挂钩不可用 */
 static int lsm_install(void)
 {
-	pr_info("prop_spoof: 6.12+ 无 LSM 链表，per-uid 文件重定向改走 SUSFS open_redirect\n");
+	int ret;
+
+	if (prop_vfs_open_live)
+		return 0;
+	ret = register_kprobe(&prop_vfs_open_kp);
+	if (ret) {
+		pr_err("prop_spoof: vfs_open kprobe 注册失败 %d\n", ret);
+		return ret;
+	}
+	prop_vfs_open_live = true;
+	pr_info("prop_spoof: vfs_open kprobe 已挂载（6.12 per-uid 属性区重定向, entries=%d）\n",
+		prop_redir_count);
 	return 0;
 }
 
 static void lsm_remove(void)
 {
+	if (prop_vfs_open_live) {
+		unregister_kprobe(&prop_vfs_open_kp);
+		prop_vfs_open_live = false;
+		pr_info("prop_spoof: vfs_open kprobe 已摘除\n");
+	}
 }
 #endif	/* PROP_LSM_OK */
 
