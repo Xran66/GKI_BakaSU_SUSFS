@@ -198,11 +198,16 @@ integrate() {
         fi
     done
     write_version "$WORK/BakaSU" "$common/drivers/bakasu/kernel/elden-version.mk"
-    # 版本串去 -dirty：打完 susfs/BakaSU/Lineage_Hide 补丁工作区必然是 dirty 状态，
-    # setlocalversion 与 kleaf stamp.bzl 都会追加 -dirty，这里统一抑制。
-    sed -i 's/-dirty//' "$common/scripts/setlocalversion" 2>/dev/null || true
-    sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" \
-        "$KERNEL/build/kernel/kleaf/impl/stamp.bzl" 2>/dev/null || true
+    # 版本串去 -dirty：打完 susfs/BakaSU/Lineage_Hide 补丁工作区必然是 dirty 状态。
+    # 三条路径都处理：legacy setlocalversion、kleaf 旧标记 -maybe-dirty、kleaf 新标记 --dirty。
+    sed -i 's/-dirty//g' "$common/scripts/setlocalversion" 2>/dev/null || true
+    if [ -f "$KERNEL/build/kernel/kleaf/impl/stamp.bzl" ]; then
+        sed -i 's/-maybe-dirty//g; s/--dirty//g; s/-dirty//g' \
+            "$KERNEL/build/kernel/kleaf/impl/stamp.bzl"
+        echo "version: kleaf stamp.bzl dirty 标记已清除"
+    fi
+    grep -q -- '--dirty' "$KERNEL/build/kernel/kleaf/impl/stamp.bzl" 2>/dev/null &&
+        echo "WARN: stamp.bzl 仍含 --dirty"
     echo "version: -dirty suppressed"
     if [[ $ADD_PROPSPOOF == 1 ]]; then
         mkdir -p "$common/drivers/prop_spoof"
