@@ -604,6 +604,25 @@ jobs:
 
       # ==================== 应用 SUSFS 补丁 ====================
       # SUSFS (Super User SUS FileSystem) 用于隐藏 root 痕迹
+      # ==================== KSU SELinux 探针加固 ====================
+      # 类原生 GSI(userdebug) 的策略带 adbroot/su 域，检测器探测即可判定篡改。
+      # 这里对 uid>=10000 在 write_context/write_access/setprocattr 三处直接 -EINVAL。
+      - name: 加固 KSU selinux_hide 探针
+        if: ${{ inputs.lineage_hide && inputs.clean_build != true }}
+        run: |
+          set -euo pipefail
+          SCRIPT="$GITHUB_WORKSPACE/lineage_hide/selinux_hide_patch.sh"
+          if [ ! -f "$SCRIPT" ]; then
+            echo "::warning::未找到内置 selinux_hide_patch.sh，跳过探针加固"
+            exit 0
+          fi
+          KSU_SRC="${{ env.KERNEL_ROOT }}/KernelSU"
+          if [ ! -f "$KSU_SRC/kernel/feature/selinux_hide.c" ]; then
+            echo "::warning::未找到 BakaSU 源码 $KSU_SRC，跳过探针加固"
+            exit 0
+          fi
+          bash "$SCRIPT" "$KSU_SRC" || echo "::warning::selinux_hide 加固失败，继续构建"
+
       - name: 应用 SUSFS 补丁
         if: ${{ inputs.clean_build != true && inputs.enable_susfs && !(inputs.android_version == 'android17' && inputs.kernel_version == '6.18') }}
         working-directory: ${{ env.KERNEL_ROOT }}
