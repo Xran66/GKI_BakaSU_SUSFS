@@ -1143,13 +1143,17 @@ jobs:
         working-directory: ${{ env.KERNEL_ROOT }}
         run: |
           set -euo pipefail
-          mkdir -p "$GITHUB_WORKSPACE/lineage_hide"
-          curl -fsSL --retry 5 "https://raw.githubusercontent.com/null07089/Lineage_Hide/main/scripts/patch-kernel.sh" \
-            -o "$GITHUB_WORKSPACE/lineage_hide/patch-kernel.sh"
-          chmod +x "$GITHUB_WORKSPACE/lineage_hide/patch-kernel.sh"
-          bash "$GITHUB_WORKSPACE/lineage_hide/patch-kernel.sh" ./common
-          echo "--- 补丁状态 ---"
-          bash "$GITHUB_WORKSPACE/lineage_hide/patch-kernel.sh" --check ./common || true
+          SCRIPT="$GITHUB_WORKSPACE/lineage_hide/patch-kernel.sh"
+          if [ ! -f "$SCRIPT" ]; then
+            echo "::warning::未找到内置 lineage_hide/patch-kernel.sh，跳过 procfs 清洗"
+            exit 0
+          fi
+          chmod +x "$SCRIPT"
+          if bash "$SCRIPT" ./common; then
+            echo "procfs 清洗补丁已应用（自建补丁）"
+          else
+            echo "::warning::procfs 清洗补丁失败（锚点不匹配），继续构建"
+          fi
 
       # ==================== 添加 SUSFS 配置 ====================
       # 启用 SUSFS 各项隐藏功能
