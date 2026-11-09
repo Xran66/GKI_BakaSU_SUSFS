@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
-BUILD_NUMBER=$(/usr/bin/shuf -i 10000000-99999999 -n 1)
+BUILD_NUMBER=${KVER_BUILD_ID:-$(/usr/bin/shuf -i 10000000-99999999 -n 1)}
 export BUILD_NUMBER
+# 版本串时间戳（内核 banner / uname -v 用）
+if [[ -n ${KVER_TIMESTAMP:-} ]]; then
+    export KBUILD_BUILD_TIMESTAMP="$KVER_TIMESTAMP"
+fi
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 source "$ROOT/boot.conf"
@@ -196,6 +200,14 @@ integrate() {
             fail "Lineage_Hide: BakaSU commit 失败"
         echo "Lineage_Hide: KSU selinux_hide hardened (adbroot/su probes blocked)"
     fi
+    if [[ -n ${KVER_SUBLEVEL:-} ]]; then
+        local cur
+        cur=$(awk '/^SUBLEVEL = /{print $3; exit}' "$common/Makefile")
+        if [[ $cur != "$KVER_SUBLEVEL" ]]; then
+            sed -i "s/^SUBLEVEL = .*/SUBLEVEL = ${KVER_SUBLEVEL}/" "$common/Makefile"
+            echo "版本串: SUBLEVEL $cur -> ${KVER_SUBLEVEL}"
+        fi
+    fi
     git -C "$WORK/BakaSU" archive HEAD kernel uapi LICENSE |
         tar -x -C "$common/drivers/bakasu"
     printf '\nsource "drivers/bakasu/kernel/Kconfig"\n' >> "$common/drivers/Kconfig"
@@ -289,6 +301,23 @@ build_image() {
             //common:kernel_aarch64_dist -- --destdir="$DIST"
     )
     [[ -s $DIST/Image ]] || fail "build produced no Image"
+    # 等长替换 git 描述段（如 gd92f18cbe947 -> g650e74cc80ec），保证 uname 与 /proc/version 同源
+    if [[ -n ${KVER_GITDESC:-} ]]; then
+        python3 - "$DIST/Image" "$KVER_GITDESC" <<'PYEOF'
+import re, sys
+path, desc = sys.argv[1], sys.argv[2]
+data = open(path, 'rb').read()
+pat = re.compile(rb'-android16-6-g[0-9a-f]{12}')
+n = 0
+def sub(m):
+    global n
+    n += 1
+    return b'-android16-6-g' + desc.encode()
+data = pat.sub(sub, data)
+open(path, 'wb').write(data)
+print('git 描述替换 %d 处 -> -android16-6-g%s' % (n, desc))
+PYEOF
+    fi
     check_config "$DIST/kernel_aarch64_dot_config"
 }
 
