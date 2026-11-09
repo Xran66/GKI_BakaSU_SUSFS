@@ -80,11 +80,17 @@ else:
         ok = False
     else:
         s = s.replace(inc, inc + '\n#include <linux/lineage_hide.h>', 1)
-        ins = anchor + '\n\t\tif (!IS_ERR(p))\n\t\t\tlineage_hide_scrub_rom_names(p);'
-        s = s.replace(anchor, ins, 1)
-        with open(seq, 'w', encoding='utf-8', errors='surrogateescape') as f:
-            f.write(s)
-        print('已打补丁:', seq)
+        pos = s.find(anchor)
+        blk = s.find('if (!IS_ERR(p)) {', pos)
+        if blk < 0:
+            print('WARN: seq_file.c 找不到 IS_ERR 代码块，跳过', file=sys.stderr)
+            ok = False
+        else:
+            brace = s.find('{', blk)
+            s = s[:brace + 1] + '\n\t\t\tlineage_hide_scrub_rom_names(p);' + s[brace + 1:]
+            with open(seq, 'w', encoding='utf-8', errors='surrogateescape') as f:
+                f.write(s)
+            print('已打补丁:', seq)
 
 # ---- 2) fs/proc/base.c：do_proc_readlink() 长度计算前清洗（覆盖 fd / map_files）----
 base = os.path.join(kdir, 'fs/proc/base.c')
@@ -103,10 +109,25 @@ else:
         ok = False
     else:
         b = b.replace(inc, inc + '\n#include <linux/lineage_hide.h>', 1)
-        b = b.replace(hit, '\tlineage_hide_scrub_rom_names(pathname);\n\t' + hit, 1)
-        with open(base, 'w', encoding='utf-8', errors='surrogateescape') as f:
-            f.write(b)
-        print('已打补丁:', base)
+        # 沿用锚点行自身的缩进，避免 -Werror=misleading-indentation
+        out = []
+        inserted = False
+        for line in b.split('\n'):
+            if not inserted and line.strip() == hit:
+                indent = line[:len(line) - len(line.lstrip())]
+                out.append(indent + 'lineage_hide_scrub_rom_names(pathname);')
+                out.append(line)
+                inserted = True
+            else:
+                out.append(line)
+        if not inserted:
+            print('WARN: base.c 锚点行定位失败，跳过', file=sys.stderr)
+            ok = False
+        else:
+            b = '\n'.join(out)
+            with open(base, 'w', encoding='utf-8', errors='surrogateescape') as f:
+                f.write(b)
+            print('已打补丁:', base)
 
 sys.exit(0 if ok else 2)
 PY
