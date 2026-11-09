@@ -50,7 +50,19 @@ sync_git() {
     if [[ ! -e $path ]]; then
         local depth=()
         [[ $full == true ]] || depth=(--depth=1)
-        git clone --single-branch --branch "$branch" "${depth[@]}" "$url" "$path"
+        # GitHub 偶发 401/限流（could not read Username）→ 重试 3 次，
+        # 并关闭交互提示，避免直接以 exit 128 退出
+        local try rc
+        for try in 1 2 3; do
+            rc=0
+            GIT_TERMINAL_PROMPT=0 git clone --single-branch --branch "$branch" \
+                "${depth[@]}" "$url" "$path" || rc=$?
+            [[ $rc == 0 ]] && break
+            echo "sync_git: clone $url 失败 (rc=$rc)，第 $try 次重试" >&2
+            rm -rf -- "$path"
+            sleep $((try * 5))
+        done
+        [[ $rc == 0 ]] || fail "clone failed after retries: $url"
     else
         [[ $(git -C "$path" remote get-url origin) == "$url" ]] || fail "wrong origin: $path"
     fi
