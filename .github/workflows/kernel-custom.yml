@@ -1,6 +1,8 @@
 name: Android 内核构建-自定义
 
-# 适配 Node.js 24
+# 自助构建：只选三个下拉（安卓版本 / 内核版本 / 基线日期），
+# 内核子版本号由 workflow 自动从 ACK 源码 Makefile 探测，无需手填 commit。
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -11,80 +13,88 @@ permissions:
 on:
   workflow_dispatch:
     inputs:
-      # ==================== 内核版本配置 ====================
+      # ==================== ① 目标平台（三选一链） ====================
       android_version:
-        description: "Android 版本"
+        description: "① 安卓版本"
         required: true
         type: choice
+        default: android16
         options:
-          - android12
-          - android13
-          - android14
-          - android15
           - android16
-          - android17
-        default: android12
+          - android15
+          - android14
+          - android13
+          - android12
+
       kernel_version:
-        description: "内核版本"
+        description: "② 内核版本"
         required: true
         type: choice
+        default: "6.12"
         options:
-          - "5.10"
-          - "5.15"
-          - "6.1"
-          - "6.6"
           - "6.12"
-          - "6.18"
-        default: "5.10"
-      sub_level:
-        description: "子版本号 (如 66, 198, X)"
-        required: true
-        type: string
-        default: "66"
-      os_patch_level:
-        description: "安全补丁级别 (如 2022-01, lts)"
-        required: true
-        type: string
-        default: "2022-01"
-      revision:
-        description: "修订版本 (如 r11, 仅 5.10 需要)"
-        required: false
-        type: string
-        default: "r11"
+          - "6.6"
+          - "6.1"
+          - "5.15"
+          - "5.10"
 
-      # ==================== KernelSU 配置 ====================
-      # KernelSU 变体固定为 BakaSU
-      kernelsu_branch:
-        description: "KSU 分支 (main/builtin/自定义commit hash，留空使用默认)"
+      baseline:
+        description: "③ 基线日期（head=主线最新，lts=LTS 最新，其余为 ACK 月度分支）"
+        required: true
+        type: choice
+        default: "head"
+        options:
+          - "head"
+          - "lts"
+          - "2026-10"
+          - "2026-09"
+          - "2026-08"
+          - "2026-07"
+          - "2026-06"
+          - "2026-05"
+          - "2026-04"
+          - "2026-03"
+          - "2026-02"
+          - "2026-01"
+          - "2025-12"
+
+      revision:
+        description: "④ 修订号（仅 5.10 需要，如 r11；其余留空）"
         required: false
         type: string
         default: ""
 
-      # ==================== 可选配置 ====================
-      version:
-        description: "自定义版本名 (可选)"
+      # ==================== KernelSU / BakaSU ====================
+      ksu_source:
+        description: "KSU 版本"
+        required: true
+        type: choice
+        default: "锁定 10-31（516d3e87，已验证）"
+        options:
+          - "锁定 10-31（516d3e87，已验证）"
+          - "跟随 main 最新"
+          - "自定义 commit"
+
+      ksu_custom:
+        description: "自定义 BakaSU commit（仅上面选“自定义”时生效）"
         required: false
         type: string
-      build_time:
-        description: "自定义构建时间 (可选，N或留空=当前UTC)"
-        required: false
-        type: string
-        default: "Sun Dec 01 08:10:00 UTC 2024"
+        default: ""
 
       # ==================== 功能开关 ====================
       clean_build:
-        description: "清洁构建 (不集成 KernelSU、SUSFS 和可选补丁)"
+        description: "纯净构建（不集成 BakaSU / SUSFS / 补丁）"
+        required: false
         type: boolean
         default: false
-
       use_zram:
         description: "启用 ZRAM 增强算法"
-        required: true
+        required: false
         type: boolean
         default: false
       cancel_susfs:
         description: "禁用 SUSFS"
-        required: true
+        required: false
         type: boolean
         default: false
       use_nomount:
@@ -92,54 +102,123 @@ on:
         required: false
         type: boolean
         default: false
+      use_prop_spoof:
+        description: "集成 prop_spoof 属性/机型伪装（内建，参数由配套模块注入）"
+        required: false
+        type: boolean
+        default: true
       prop_spoof_trace:
-        description: "prop_spoof 调试检测模式（按 uid 记录全部 open 路径）"
+        description: "prop_spoof 调试检测模式（按 uid 记录 open 路径，日常不要开）"
         required: false
         type: boolean
         default: false
       lineage_hide:
-        description: "Lineage_Hide procfs 清洗补丁"
+        description: "Lineage_Hide（procfs 路径清洗 + KSU SELinux 探针加固）"
         required: false
         type: boolean
-        default: false
-      use_prop_spoof:
-        description: "集成 prop_spoof 属性伪装（内建，参数由配套模块注入）"
+        default: true
+
+      # ==================== 可选 ====================
+      version:
+        description: "自定义版本名（可选，留空自动）"
         required: false
-        type: boolean
-        default: false
+        type: string
+        default: ""
+      build_time:
+        description: "自定义构建时间（可选，留空用当前 UTC）"
+        required: false
+        type: string
+        default: ""
 
 jobs:
-  validate-custom-kmi:
+  resolve:
+    name: 解析参数
     runs-on: ubuntu-latest
+    outputs:
+      sub_level: ${{ steps.detect.outputs.sub_level }}
+      baseline: ${{ steps.detect.outputs.baseline }}
+      ksu_branch: ${{ steps.detect.outputs.ksu_branch }}
     steps:
-      - name: 验证 Android 与内核版本配对
+      - name: 校验组合并自动探测内核子版本
+        id: detect
         env:
           ANDROID_VERSION: ${{ inputs.android_version }}
           KERNEL_VERSION: ${{ inputs.kernel_version }}
+          BASELINE: ${{ inputs.baseline }}
+          KSU_SOURCE: ${{ inputs.ksu_source }}
+          KSU_CUSTOM: ${{ inputs.ksu_custom }}
         run: |
+          # ---- 1) Android / 内核版本配对校验 ----
           case "$ANDROID_VERSION-$KERNEL_VERSION" in
-            android12-5.10|android13-5.10|android13-5.15|android14-5.15|android14-6.1|android15-6.6|android16-6.12|android17-6.18)
-              ;;
+            android12-5.10|android13-5.10|android13-5.15|android14-5.15|android14-6.1|android15-6.6|android16-6.12|android17-6.18) ;;
             *)
-              echo "::error::不支持的 Android/KMI 组合: $ANDROID_VERSION / $KERNEL_VERSION"
-              exit 1
-              ;;
+              echo "::error::不支持的组合: $ANDROID_VERSION + $KERNEL_VERSION（GKI 配对：12/5.10、13/5.10 或 5.15、14/5.15 或 6.1、15/6.6、16/6.12）"
+              exit 1 ;;
           esac
 
+          # ---- 2) 计算 ACK 分支名（与 build.yml 一致）----
+          if [ "$BASELINE" = "head" ]; then
+            BRANCH="$ANDROID_VERSION-$KERNEL_VERSION"
+          else
+            BRANCH="$ANDROID_VERSION-$KERNEL_VERSION-$BASELINE"
+          fi
+          echo "探测分支: $BRANCH"
+
+          # ---- 3) 自动探测子版本号（ACK Makefile）----
+          SUB=""
+          for b in "$BRANCH" "deprecated/$BRANCH"; do
+            MK=$(curl -sf --max-time 30 "https://android.googlesource.com/kernel/common/+/refs/heads/$b/Makefile?format=TEXT" | base64 -d 2>/dev/null || true)
+            if [ -n "$MK" ]; then
+              SUB=$(printf '%s\n' "$MK" | awk -F' = ' '/^SUBLEVEL =/{print $2; exit}')
+              [ -n "$SUB" ] && { echo "命中分支: $b → 子版本 $SUB"; break; }
+            fi
+          done
+          if [ -z "$SUB" ]; then
+            echo "::error::无法探测 $BRANCH 的子版本号（分支不存在或网络失败）。请换一个基线日期。"
+            exit 1
+          fi
+
+          # ---- 4) KSU 版本 ----
+          case "$KSU_SOURCE" in
+            锁定*)   KSU="516d3e87fbc986ccefdde2c2765f1700612441a9" ;;
+            跟随*)   KSU="" ;;
+            自定义*) KSU="$KSU_CUSTOM" ;;
+            *)       KSU="516d3e87fbc986ccefdde2c2765f1700612441a9" ;;
+          esac
+
+          echo "sub_level=$SUB" >> "$GITHUB_OUTPUT"
+          echo "baseline=$BASELINE" >> "$GITHUB_OUTPUT"
+          echo "ksu_branch=$KSU" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### 本轮参数"
+            echo ""
+            echo "| 项目 | 取值 |"
+            echo "|---|---|"
+            echo "| 安卓 / 内核 | $ANDROID_VERSION / $KERNEL_VERSION |"
+            echo "| 基线 | $BASELINE（分支 $BRANCH） |"
+            echo "| **自动探测子版本** | **$SUB**（=$KERNEL_VERSION.$SUB） |"
+            echo "| KSU | ${KSU:-main tip} |"
+            echo "| 纯净构建 | ${{ inputs.clean_build }} |"
+            echo "| SUSFS | ${{ inputs.cancel_susfs && '关' || '开' }} |"
+            echo "| prop_spoof | ${{ inputs.use_prop_spoof }} |"
+            echo "| Lineage_Hide | ${{ inputs.lineage_hide }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   build-custom-kernel:
-    name: "${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.android_version }}-${{ inputs.os_patch_level }}"
-    needs: validate-custom-kmi
+    name: "${{ inputs.kernel_version }}.${{ needs.resolve.outputs.sub_level }}-${{ inputs.android_version }}-${{ inputs.baseline }}"
+    needs: resolve
     uses: ./.github/workflows/build.yml
     secrets: inherit
     with:
       clean_build: ${{ inputs.clean_build }}
       android_version: ${{ inputs.android_version }}
       kernel_version: ${{ inputs.kernel_version }}
-      sub_level: ${{ inputs.sub_level }}
-      os_patch_level: ${{ inputs.os_patch_level }}
+      sub_level: ${{ needs.resolve.outputs.sub_level }}
+      os_patch_level: ${{ needs.resolve.outputs.baseline }}
       revision: ${{ inputs.revision || '' }}
       ksu_variant: ${{ inputs.clean_build && 'Clean' || 'BakaSU' }}
-      ksu_branch: ${{ inputs.kernelsu_branch }}
+      ksu_branch: ${{ needs.resolve.outputs.ksu_branch }}
       version: ${{ inputs.version || '' }}
       build_time: ${{ inputs.build_time || '' }}
       use_zram: ${{ inputs.use_zram }}
