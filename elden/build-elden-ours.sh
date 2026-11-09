@@ -199,15 +199,20 @@ integrate() {
     done
     write_version "$WORK/BakaSU" "$common/drivers/bakasu/kernel/elden-version.mk"
     # 版本串去 -dirty：打完 susfs/BakaSU/Lineage_Hide 补丁工作区必然是 dirty 状态。
-    # 三条路径都处理：legacy setlocalversion、kleaf 旧标记 -maybe-dirty、kleaf 新标记 --dirty。
-    sed -i 's/-dirty//g' "$common/scripts/setlocalversion" 2>/dev/null || true
-    if [ -f "$KERNEL/build/kernel/kleaf/impl/stamp.bzl" ]; then
-        sed -i 's/-maybe-dirty//g; s/--dirty//g; s/-dirty//g' \
-            "$KERNEL/build/kernel/kleaf/impl/stamp.bzl"
-        echo "version: kleaf stamp.bzl dirty 标记已清除"
-    fi
-    grep -q -- '--dirty' "$KERNEL/build/kernel/kleaf/impl/stamp.bzl" 2>/dev/null &&
-        echo "WARN: stamp.bzl 仍含 --dirty"
+    # kleaf 的 scmversion 生成点随版本漂移（setlocalversion / stamp.bzl / build.sh），
+    # 这里对 build/ 与 common/ 下所有含 dirty 字样的构建脚本做全量清除。
+    for f in "$common/scripts/setlocalversion"; do
+        [ -f "$f" ] && sed -i 's/-dirty//g' "$f"
+    done
+    grep -rl --include='*.bzl' --include='*.sh' --include='*.py' --include='*.bazel' \
+        -e 'dirty' "$KERNEL/build" "$KERNEL/common" 2>/dev/null |
+        while IFS= read -r f; do
+            case "$f" in
+                */out/*|*/bazel-*/*) continue ;;
+            esac
+            sed -i 's/-maybe-dirty//g; s/--dirty//g; s/-dirty//g' "$f"
+            echo "dirty-strip: ${f#$KERNEL/}"
+        done
     echo "version: -dirty suppressed"
     if [[ $ADD_PROPSPOOF == 1 ]]; then
         mkdir -p "$common/drivers/prop_spoof"
