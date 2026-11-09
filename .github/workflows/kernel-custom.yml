@@ -176,7 +176,7 @@ jobs:
             SUB=$(printf '%s' "$TAG" | sed -nE 's/.*-[0-9]+\.[0-9]+\.([0-9]+)_r[0-9]+.*/\1/p')
             [ -n "$SUB" ] && echo "source_tag=$TAG -> 子版本 $SUB"
           fi
-          SUB=""
+          if [ -z "$SUB" ]; then
           for b in "$BRANCH" "deprecated/$BRANCH"; do
             MK=$(curl -sf --max-time 30 "https://android.googlesource.com/kernel/common/+/refs/heads/$b/Makefile?format=TEXT" | base64 -d 2>/dev/null || true)
             if [ -n "$MK" ]; then
@@ -184,6 +184,7 @@ jobs:
               [ -n "$SUB" ] && { echo "命中分支: $b → 子版本 $SUB"; break; }
             fi
           done
+          fi
           if [ -z "$SUB" ]; then
             echo "::error::无法探测 $BRANCH 的子版本号（分支不存在或网络失败）。请换一个基线日期。"
             exit 1
