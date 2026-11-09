@@ -25,6 +25,11 @@ on:
       kernel_version:
         required: true
         type: string
+      source_tag:
+        description: "锁定 kernel/common 源码 tag（如 android16-6.12.58_r00；留空走分支逻辑）"
+        required: false
+        type: string
+        default: ""
       sub_level:
         required: true
         type: string
@@ -433,6 +438,14 @@ jobs:
                 ;;
               *) echo "prop_spoof: 该 KMI 未配置基线锁定，使用分支最新" ;;
             esac
+          fi
+
+          # 指定源码 tag 时最高优先级：直接锁定 kernel/common，忽略上面的分支/基线逻辑
+          if [ -n "${{ inputs.source_tag }}" ]; then
+            SRC_TAG="${{ inputs.source_tag }}"
+            case "$SRC_TAG" in refs/*) ;; *) SRC_TAG="refs/tags/${SRC_TAG}" ;; esac
+            python3 -c "import sys,xml.etree.ElementTree as ET; p='$DEFAULT_MANIFEST_PATH'; sha='$SRC_TAG'; t=ET.parse(p); r=t.getroot(); ps=[x for x in r.iter('project') if x.get('name')=='kernel/common']; [x.set('revision',sha) for x in ps]; t.write(p,encoding='UTF-8',xml_declaration=True); print('manifest patched',len(ps),sha); sys.exit(0 if len(ps)==1 else 1)" || { echo "::error::manifest 锁定 source_tag 失败: $SRC_TAG"; exit 1; }
+            echo "已锁定源码 tag: $SRC_TAG"
           fi
 
           retry 3 30 "$REPO" --trace sync -c "-j$(nproc --all)" --no-tags --fail-fast
