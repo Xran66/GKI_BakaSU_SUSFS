@@ -138,6 +138,20 @@ jobs:
             *)           SUSFS="";                                          SDESC="susfs4ksu tip" ;;
           esac
 
+          # ---- 版本串对齐（vivo 基线）----
+          if [[ "${{ inputs.force_kver }}" == 是* ]]; then
+            KV_SUB=58; KV_ID=ogki503021821
+            KV_TS="Sat Oct 31 17:31:39 UTC 2026"; KV_DESC=650e74cc80ec
+          else
+            KV_SUB=""; KV_ID=""; KV_TS=""; KV_DESC=""
+          fi
+          {
+            echo "kver_sub=$KV_SUB"
+            echo "kver_id=$KV_ID"
+            echo "kver_ts=$KV_TS"
+            echo "kver_desc=$KV_DESC"
+          } >> "$GITHUB_OUTPUT"
+
           echo "common=$COMMON" >> "$GITHUB_OUTPUT"
           echo "bakasu=$BAKASU" >> "$GITHUB_OUTPUT"
           echo "susfs=$SUSFS" >> "$GITHUB_OUTPUT"
@@ -163,10 +177,10 @@ jobs:
           GKI_COMMON_COMMIT: ${{ steps.resolve.outputs.common }}
           BAKASU_COMMIT: ${{ steps.resolve.outputs.bakasu }}
           SUSFS_COMMIT: ${{ steps.resolve.outputs.susfs }}
-          KVER_SUBLEVEL: ${{ (inputs.force_kver || '').startsWith('是') && '58' || '' }}
-          KVER_BUILD_ID: ${{ (inputs.force_kver || '').startsWith('是') && 'ogki503021821' || '' }}
-          KVER_TIMESTAMP: ${{ (inputs.force_kver || '').startsWith('是') && 'Sat Oct 31 17:31:39 UTC 2026' || '' }}
-          KVER_GITDESC: ${{ (inputs.force_kver || '').startsWith('是') && '650e74cc80ec' || '' }}
+          KVER_SUBLEVEL: ${{ steps.resolve.outputs.kver_sub }}
+          KVER_BUILD_ID: ${{ steps.resolve.outputs.kver_id }}
+          KVER_TIMESTAMP: ${{ steps.resolve.outputs.kver_ts }}
+          KVER_GITDESC: ${{ steps.resolve.outputs.kver_desc }}
         run: |
           cd build
           JOBS=8 ./build-bakasu-elden.sh
