@@ -53,12 +53,13 @@ static inline bool lineage_hide_deny_probe(const char *buf, size_t size)
 }
 '''
 
-# ---- 1) 插入 helper（放在 my_write_context 定义之前）----
-anchor = "static inline u32 current_sid(void)"
+# ---- 1) 插入 helper（放在无条件的 include 区，避免被 #ifndef 排除）----
+#     注意：不能放 current_sid 之前——那块在 KSU_COMPAT_HAS_CURRENT_SID 下会被整体排除
+anchor = '#include "compat/kernel_compat.h"'
 if anchor not in src:
-    print("error: 找不到 current_sid 锚点", file=sys.stderr)
+    print("error: 找不到 compat/kernel_compat.h include 锚点", file=sys.stderr)
     sys.exit(1)
-src = src.replace(anchor, HELPER + "\n" + anchor, 1)
+src = src.replace(anchor, anchor + "\n" + HELPER, 1)
 
 # ---- 2) my_write_context / my_write_access：函数体开头加守卫 ----
 def insert_guard(text, sig_regex, ret="-EINVAL"):
