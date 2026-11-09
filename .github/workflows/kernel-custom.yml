@@ -58,6 +58,12 @@ on:
           - "2026-01"
           - "2025-12"
 
+      source_tag:
+        description: "源码 tag（可选，如 android16-6.12.58_r00；填了直接用该 tag）"
+        required: false
+        type: string
+        default: ""
+
       revision:
         description: "④ 修订号（仅 5.10 需要，如 r11；其余留空）"
         required: false
@@ -165,6 +171,11 @@ jobs:
           echo "探测分支: $BRANCH"
 
           # ---- 3) 自动探测子版本号（ACK Makefile）----
+          TAG="${{ inputs.source_tag }}"
+          if [ -n "$TAG" ]; then
+            SUB=$(printf '%s' "$TAG" | sed -nE 's/.*-[0-9]+\.[0-9]+\.([0-9]+)_r[0-9]+.*/\1/p')
+            [ -n "$SUB" ] && echo "source_tag=$TAG -> 子版本 $SUB"
+          fi
           SUB=""
           for b in "$BRANCH" "deprecated/$BRANCH"; do
             MK=$(curl -sf --max-time 30 "https://android.googlesource.com/kernel/common/+/refs/heads/$b/Makefile?format=TEXT" | base64 -d 2>/dev/null || true)
@@ -217,6 +228,7 @@ jobs:
       sub_level: ${{ needs.resolve.outputs.sub_level }}
       os_patch_level: ${{ needs.resolve.outputs.baseline }}
       revision: ${{ inputs.revision || '' }}
+      source_tag: ${{ inputs.source_tag || '' }}
       ksu_variant: ${{ inputs.clean_build && 'Clean' || 'BakaSU' }}
       ksu_branch: ${{ needs.resolve.outputs.ksu_branch }}
       version: ${{ inputs.version || '' }}
