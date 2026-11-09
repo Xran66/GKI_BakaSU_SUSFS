@@ -125,7 +125,23 @@ sync_sources() {
     git -C "$WORK/AnyKernel3" fetch --depth=1 origin \
         +refs/heads/arm64-tools:refs/remotes/origin/arm64-tools
     if [[ $ADD_LINEAGEHIDE == 1 ]]; then
-        sync_git "$WORK/lineage_hide" https://github.com/null07089/Lineage_Hide.git main
+        # 自建补丁（仓库内 lineage_hide/）：上游 null07089/Lineage_Hide 已删除，
+        # 不再依赖网络；若仓库内缺失才尝试上游（存在则用上游）。
+        if [[ -d $ROOT/lineage_hide ]] && [[ -f $ROOT/lineage_hide/patch-kernel.sh ]]; then
+            echo "lineage_hide: 使用仓库内置补丁 $ROOT/lineage_hide"
+        else
+            sync_git "$WORK/lineage_hide" \
+                https://github.com/null07089/Lineage_Hide.git main || \
+                echo "WARN: lineage_hide 上游不可用，且无内置补丁，将跳过" >&2
+        fi
+    fi
+}
+
+lineage_hide_dir() {
+    if [[ -d $ROOT/lineage_hide ]] && [[ -f $ROOT/lineage_hide/patch-kernel.sh ]]; then
+        printf '%s\n' "$ROOT/lineage_hide"
+    else
+        printf '%s\n' "$WORK/lineage_hide/scripts"
     fi
 }
 
@@ -170,8 +186,13 @@ integrate() {
         # KSU selinux_hide 加固必须在 git archive 之前打并提交：
         # 堵住 selinuxfs context/access/setprocattr 三条回退探针路径
         # （对应用探测 u:r:adbroot:s0 / su:s0 返回 -EINVAL）
-        bash "$WORK/lineage_hide/scripts/selinux_hide_patch.sh" "$WORK/BakaSU" ||
-            fail "Lineage_Hide: selinux_hide_patch.sh 失败"
+        LHD=$(lineage_hide_dir)
+        if [ -f "$LHD/selinux_hide_patch.sh" ]; then
+            bash "$LHD/selinux_hide_patch.sh" "$WORK/BakaSU" ||
+                echo "WARN: selinux_hide 加固失败，继续构建" >&2
+        else
+            echo "WARN: 未找到 selinux_hide_patch.sh，跳过" >&2
+        fi
         git -C "$WORK/BakaSU" add -A
         git -C "$WORK/BakaSU" -c user.email=ci@localhost -c user.name=ci \
             commit -q -m "lineage_hide: harden ksu selinux_hide probes" ||
@@ -235,8 +256,14 @@ integrate() {
         echo "prop_spoof: integrated (builtin, inert until cfg start)"
     fi
     if [[ $ADD_LINEAGEHIDE == 1 ]]; then
-        bash "$WORK/lineage_hide/scripts/patch-kernel.sh" "$common"
-        echo "Lineage_Hide: procfs scrub patches applied"
+        LHD=$(lineage_hide_dir)
+        if [ -f "$LHD/patch-kernel.sh" ]; then
+            bash "$LHD/patch-kernel.sh" "$common" ||
+                echo "WARN: procfs 清洗补丁失败（锚点不匹配），继续构建" >&2
+            echo "Lineage_Hide: procfs scrub 完成（自建补丁）"
+        else
+            echo "WARN: 未找到 patch-kernel.sh，跳过 procfs 清洗" >&2
+        fi
     fi
 }
 
