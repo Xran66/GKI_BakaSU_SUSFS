@@ -125,14 +125,11 @@ sync_sources() {
     git -C "$WORK/AnyKernel3" fetch --depth=1 origin \
         +refs/heads/arm64-tools:refs/remotes/origin/arm64-tools
     if [[ $ADD_LINEAGEHIDE == 1 ]]; then
-        # 自建补丁（仓库内 lineage_hide/）：上游 null07089/Lineage_Hide 已删除，
-        # 不再依赖网络；若仓库内缺失才尝试上游（存在则用上游）。
+        # 上游 null07089/Lineage_Hide 已删除，只用仓库内置补丁（由 workflow 复制进 build/）
         if [[ -d $ROOT/lineage_hide ]] && [[ -f $ROOT/lineage_hide/patch-kernel.sh ]]; then
             echo "lineage_hide: 使用仓库内置补丁 $ROOT/lineage_hide"
         else
-            sync_git "$WORK/lineage_hide" \
-                https://github.com/null07089/Lineage_Hide.git main || \
-                echo "WARN: lineage_hide 上游不可用，且无内置补丁，将跳过" >&2
+            echo "WARN: 未找到内置 lineage_hide 补丁，跳过 procfs 清洗/SELinux 加固" >&2
         fi
     fi
 }
