@@ -93,7 +93,10 @@ jobs:
         run: |
           cp elden/build-elden-ours.sh build/build-bakasu-elden.sh
           cp elden/prop_spoof.c build/prop_spoof.c
-          chmod 755 build/build-bakasu-elden.sh
+          # 内置 lineage_hide 补丁（上游仓库已删除，改为仓库自带）
+          rm -rf build/lineage_hide
+          cp -r lineage_hide build/lineage_hide
+          chmod 755 build/build-bakasu-elden.sh build/lineage_hide/*.sh
 
       - name: 解析参数
         id: resolve
