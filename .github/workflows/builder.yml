@@ -47,6 +47,15 @@ on:
           - "锁定 10-29（6b60a305，已验证）"
           - "跟随 susfs4ksu 最新（11 月版可能破坏 SELinux）"
 
+      force_kver:
+        description: "版本串对齐 vivo 基线（6.12.58-...-abogki503021821-4k）"
+        required: true
+        type: choice
+        default: "否（用真实版本串）"
+        options:
+          - "否（用真实版本串）"
+          - "是（伪装成 6.12.58 vivo 基线）"
+
       add_propspoof:
         description: "内建属性/机型伪装（prop_spoof：kprobe 按 app 伪装 + cpuinfo/sys）"
         required: true
@@ -154,6 +163,10 @@ jobs:
           GKI_COMMON_COMMIT: ${{ steps.resolve.outputs.common }}
           BAKASU_COMMIT: ${{ steps.resolve.outputs.bakasu }}
           SUSFS_COMMIT: ${{ steps.resolve.outputs.susfs }}
+          KVER_SUBLEVEL: ${{ (inputs.force_kver || '').startsWith('是') && '58' || '' }}
+          KVER_BUILD_ID: ${{ (inputs.force_kver || '').startsWith('是') && 'ogki503021821' || '' }}
+          KVER_TIMESTAMP: ${{ (inputs.force_kver || '').startsWith('是') && 'Sat Oct 31 17:31:39 UTC 2026' || '' }}
+          KVER_GITDESC: ${{ (inputs.force_kver || '').startsWith('是') && '650e74cc80ec' || '' }}
         run: |
           cd build
           JOBS=8 ./build-bakasu-elden.sh
