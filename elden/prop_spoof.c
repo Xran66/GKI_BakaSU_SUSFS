@@ -375,7 +375,30 @@ static int prop_vfs_open_pre(struct kprobe *p, struct pt_regs *regs)
 	if (!pp || !pp->dentry || !pp->mnt)
 		return 0;
 	nm = pp->dentry->d_name.name;
-	if (!nm || strncmp(nm, PROP_CTX_PREFIX, sizeof(PROP_CTX_PREFIX) - 1))
+	if (!nm)
+		return 0;
+
+	/* /proc/version 伪装：父目录为 proc 根、文件名为 "version" 时，
+	 * 把 path 换成 cfg "redir version <假文件>" 登记的假文件。
+	 * 目的：让 /proc/version 与 susfs set_uname 的假串完全一致，
+	 * 通过「内核信息与基线比对 + 伪装一致性」两项检测。 */
+	if (nm[0] == 'v' && !strcmp(nm, "version")) {
+		const char *pn = pp->dentry->d_parent ?
+				 pp->dentry->d_parent->d_name.name : NULL;
+
+		if (pn && !strcmp(pn, "proc")) {
+			if (!is_target())
+				return 0;
+			r = prop_redir_lookup("version");
+			if (!r)
+				return 0;
+			((struct path *)pp)->dentry = r->path.dentry;
+			((struct path *)pp)->mnt = r->path.mnt;
+		}
+		return 0;
+	}
+
+	if (strncmp(nm, PROP_CTX_PREFIX, sizeof(PROP_CTX_PREFIX) - 1))
 		return 0;
 	if (!is_target())
 		return 0;
