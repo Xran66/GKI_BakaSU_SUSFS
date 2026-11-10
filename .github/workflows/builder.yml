@@ -141,7 +141,7 @@ jobs:
           # ---- 版本串对齐（vivo 基线）----
           if [[ "${{ inputs.force_kver }}" == 是* ]]; then
             KV_SUB=58; KV_ID=ogki503021821
-            KV_TS="Sat Oct 31 17:31:39 UTC 2026"; KV_DESC=650e74cc80ec
+            KV_TS="Thu Apr 16 22:41:27 UTC 2026"; KV_DESC=650e74cc80ec
           else
             KV_SUB=""; KV_ID=""; KV_TS=""; KV_DESC=""
           fi
