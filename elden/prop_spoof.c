@@ -569,6 +569,10 @@ static char cfg_fakes[2048];
 static bool builtin_started;
 static bool nodes_hidden;
 
+/* 运行时开关：`vma 0` 完全关闭属性区 VMA 迁移（A/B 验证 panic 用）。
+ * 关闭后 cpuinfo / version / Build 堆改写仍然生效，只是属性表不伪装。*/
+static bool prop_vma_enabled = true;
+
 /* proc 节点自毁：配置全部下发、假文件引用都已被内核持有之后，
  * 把 /proc/prop_spoof 和 /proc/prop_spoof_cfg 从 procfs 摘掉。
  * 目的：任何进程 ls /proc 都看不到这两个名字（名字本身就是线索）。
@@ -584,9 +588,9 @@ static DECLARE_DELAYED_WORK(prop_hide_work, prop_hide_work_fn);
 
 static int cfg_show(struct seq_file *m, void *v)
 {
-	seq_printf(m, "builtin=1 started=%d fakedir=%s uids=%s\n",
-		   builtin_started ? 1 : 0, fake_dir ? fake_dir : "",
-		   target_uids ? target_uids : "");
+	seq_printf(m, "builtin=1 started=%d vma=%d fakedir=%s uids=%s\n",
+		   builtin_started ? 1 : 0, prop_vma_enabled ? 1 : 0,
+		   fake_dir ? fake_dir : "", target_uids ? target_uids : "");
 	return 0;
 }
 
@@ -695,6 +699,9 @@ static ssize_t cfg_write(struct file *f, const char __user *ub, size_t n,
 			prop_redirs[prop_redir_count].path = p;
 			prop_redir_count++;
 #endif
+		} else if (!strncmp(line, "vma ", 4)) {
+			prop_vma_enabled = (line[4] != '0');
+			pr_info("prop_spoof: cfg vma=%d\n", prop_vma_enabled);
 		} else if (!strcmp(line, "hide")) {
 			schedule_delayed_work(&prop_hide_work, 2 * HZ);
 			pr_info("prop_spoof: cfg hide 已排程\n");
@@ -936,6 +943,11 @@ static int prop_lazy_mmap(struct file *file, struct vm_area_struct *vma)
 
 	if (!h || !h->fake_file || !h->fake_file->f_op || !h->fake_file->f_op->mmap)
 		return -ENODEV;
+	/* vma 0：完全不碰 VMA，走真 fops，保证 i_mmap 树与 vm_file 始终一致 */
+	if (!prop_vma_enabled && h->orig_fops && h->orig_fops->mmap)
+		return h->orig_fops->mmap(file, vma);
+	/* 此处 VMA 尚未被 __mmap_region 插入任何 i_mmap 树，换 vm_file 是安全的：
+	 * 随后内核会按新的 vm_file->f_mapping 插入到假 inode 树，自洽。*/
 	vma_set_file(vma, h->fake_file);
 	return h->fake_file->f_op->mmap(h->fake_file, vma);
 }
@@ -954,15 +966,31 @@ static ssize_t prop_lazy_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	return ret;
 }
 
-/* 目标进程的属性区 vma → 假文件，并清旧页（重 fault 出假内容） */
+/* 目标进程的属性区 vma → 假文件（6.6 内核语义修正版）
+ *
+ * 关键：6.6 的 __mmap_region() 对「所有」vma->vm_file 都无条件
+ * vma_interval_tree_insert，unlink_file_vma() 也无条件 remove，都不看
+ * VM_SHARED（见 mm/mmap.c:2910 / __vma_link_file）。所以换 vm_file 时
+ * 必须「无条件」把 shared.rb 从旧 mapping 摘下、再插到新 mapping。
+ * 只要漏掉一个，vma_close/munmap 就会在新树上删一个并不存在的节点，
+ * rb_root_cached 的 leftmost/augmented 立刻失配，下一次 mmap 插入崩在
+ * __rb_insert_augmented（NULL+8）—— 这是 21:22 / 22:50 两次 panic 的栈。
+ *
+ * 其它约束：
+ *  · 不做全量 unmap_mapping_range（扫所有进程、mmap_lock 写锁下重入 zap，
+ *    21:22 的 zap_huge_pmd panic 就是它），只 zap_vma_pages 清本进程 PTE。
+ *  · fput() 放到 i_mmap 锁外，避免临界区内触发 file release。
+ *  · 手动管理 vm_file 引用（不调用 vma_set_file），保证 remove/替换/insert
+ *    三步之间 vm_file 与树归属短暂不一致时不会额外 fput。
+ */
 __maybe_unused static void patch_target_mm(void)
 {
 	struct mm_struct *mm = current->mm;
 	struct vma_iterator vmi;
 	struct vm_area_struct *vma;
-	int patched = 0;
+	int patched = 0, skipped = 0;
 
-	if (!mm)
+	if (!mm || prop_hook_count == 0 || !prop_vma_enabled)
 		return;
 
 	down_write(&mm->mmap_lock);
@@ -970,48 +998,47 @@ __maybe_unused static void patch_target_mm(void)
 	for_each_vma(vmi, vma) {
 		struct prop_hook *h;
 		struct address_space *old_mapping, *new_mapping;
-		struct file *fake;
+		struct file *fake, *old_file;
 
 		if (!vma->vm_file)
 			continue;
 		h = prop_hook_find(vma->vm_file->f_inode);
-		if (!h || !h->fake_file)
+		if (!h || !h->fake_file) {
+			skipped++;
 			continue;
+		}
 		fake = h->fake_file;
 		old_mapping = vma->vm_file->f_mapping;
 		new_mapping = fake->f_mapping;
-		if (!old_mapping || !new_mapping || old_mapping == new_mapping)
+		if (!old_mapping || !new_mapping || old_mapping == new_mapping) {
+			skipped++;
 			continue;
-
-		/* vma_set_file 只换 vm_file，不挪 i_mmap interval tree。
-		 * 必须先从真 inode 树摘下、换指针、再插到假 inode 树，否则
-		 * rb_node 仍挂在真树上：unmap_mapping_range / __split_vma /
-		 * vma_interval_tree_insert 全部会踩坏树（实测 panic）。
-		 * 锁序与 vma_link 一致：mmap_lock(写) 在外、i_mmap_rwsem 在内。*/
-		if (vma->vm_flags & VM_SHARED) {
-			i_mmap_lock_write(old_mapping);
-			vma_interval_tree_remove(vma, &old_mapping->i_mmap);
-			i_mmap_unlock_write(old_mapping);
 		}
 
-		vma_set_file(vma, fake);
+		/* 1) 无条件从旧 inode 的 i_mmap 树摘下 */
+		i_mmap_lock_write(old_mapping);
+		vma_interval_tree_remove(vma, &old_mapping->i_mmap);
+		i_mmap_unlock_write(old_mapping);
 
-		if (vma->vm_flags & VM_SHARED) {
-			i_mmap_lock_write(new_mapping);
-			vma_interval_tree_insert(vma, &new_mapping->i_mmap);
-			i_mmap_unlock_write(new_mapping);
-		}
+		/* 2) 换 backing file（手动引用管理，锁外再释放旧引用） */
+		old_file = vma->vm_file;
+		vma->vm_file = get_file(fake);
 
-		/* 只清本进程该 vma 的 PTE，重 fault 走假文件；不再对真 inode
-		 * 全量 unmap_mapping_range（会扫所有进程并在 mmap_lock 写锁下
-		 * 重入 zap 路径，本次 panic 的 pc 就是 zap_huge_pmd）。*/
+		/* 3) 无条件插到新 inode 的 i_mmap 树 */
+		i_mmap_lock_write(new_mapping);
+		vma_interval_tree_insert(vma, &new_mapping->i_mmap);
+		i_mmap_unlock_write(new_mapping);
+
+		fput(old_file);
+
+		/* 4) 只清本进程该 vma 的 PTE，重 fault 走假文件 */
 		zap_vma_pages(vma);
 		patched++;
 	}
 	up_write(&mm->mmap_lock);
 
-	pr_info("prop_spoof: uid=%d 属性 vma 已切换 fake (%d 个)\n",
-		target_uid, patched);
+	pr_info("prop_spoof: uid=%d vma 迁移完成 patched=%d skipped=%d vma_enabled=%d\n",
+		target_uid, patched, skipped, prop_vma_enabled);
 }
 
 /* ==================================================================
