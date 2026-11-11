@@ -82,12 +82,6 @@ on:
         required: false
         type: boolean
         default: false
-      lineage_hide:
-        description: "Lineage_Hide 内核补丁：procfs 路径/链接字符串按 app uid 清洗 ROM 关键词"
-        required: false
-        type: boolean
-        default: false
-
 jobs:
   build-kernel:
     name: "${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.android_version }}-${{ inputs.os_patch_level }}${{ inputs.revision && format('-{0}', inputs.revision) || '' }}-${{ inputs.clean_build && 'Clean' || inputs.ksu_variant }}"
@@ -323,15 +317,14 @@ jobs:
             # - 上游 11-02 之后会掉 SELinux（domain 切换变更），不用
             # - 更老的 era 锁（如 2025-03）会得到旧式钩子补丁，缺 BakaSU 要求的
             #   ksu_handle_* 新式钩子（00be2d47 之后才引入），inline_hook_check 会拦
-            if [ "${{ inputs.use_prop_spoof }}" = "true" ]; then
-              PIN_DATE="2026-10-30 00:00:00 +0800"
-              PIN=$(git -C susfs4ksu rev-list -1 --before="$PIN_DATE" HEAD 2>/dev/null || true)
-              if [ -n "$PIN" ]; then
-                git -C susfs4ksu checkout --quiet "$PIN"
-                echo "SUSFS 已锁定到 $PIN_DATE 之前: $PIN"
-              else
-                echo "::error::susfs 锁定失败（无 $PIN_DATE 之前的提交）"; exit 1
-              fi
+            # 无条件锁定：无论是否启用 prop_spoof，SUSFS 都停在 10-29 最后提交。
+            PIN_DATE="2026-10-30 00:00:00 +0800"
+            PIN=$(git -C susfs4ksu rev-list -1 --before="$PIN_DATE" HEAD 2>/dev/null || true)
+            if [ -n "$PIN" ]; then
+              git -C susfs4ksu checkout --quiet "$PIN"
+              echo "SUSFS 已锁定到 $PIN_DATE 之前: $PIN"
+            else
+              echo "::error::susfs 锁定失败（无 $PIN_DATE 之前的提交）"; exit 1
             fi
             SUSFS_LATEST_COMMIT_DATE=$(git -C susfs4ksu log -1 --date=format:'%Y-%m-%d %H:%M:%S %z' --format='%cd')
             echo "SUSFS_LATEST_COMMIT_DATE=$SUSFS_LATEST_COMMIT_DATE" >> $GITHUB_ENV
@@ -617,24 +610,7 @@ jobs:
 
       # ==================== 应用 SUSFS 补丁 ====================
       # SUSFS (Super User SUS FileSystem) 用于隐藏 root 痕迹
-      # ==================== KSU SELinux 探针加固 ====================
-      # 类原生 GSI(userdebug) 的策略带 adbroot/su 域，检测器探测即可判定篡改。
-      # 这里对 uid>=10000 在 write_context/write_access/setprocattr 三处直接 -EINVAL。
-      - name: 加固 KSU selinux_hide 探针
-        if: ${{ inputs.lineage_hide && inputs.clean_build != true }}
-        run: |
-          set -euo pipefail
-          SCRIPT="$GITHUB_WORKSPACE/lineage_hide/selinux_hide_patch.sh"
-          if [ ! -f "$SCRIPT" ]; then
-            echo "::warning::未找到内置 selinux_hide_patch.sh，跳过探针加固"
-            exit 0
-          fi
-          KSU_SRC="${{ env.KERNEL_ROOT }}/KernelSU"
-          if [ ! -f "$KSU_SRC/kernel/feature/selinux_hide.c" ]; then
-            echo "::warning::未找到 BakaSU 源码 $KSU_SRC，跳过探针加固"
-            exit 0
-          fi
-          bash "$SCRIPT" "$KSU_SRC" || echo "::warning::selinux_hide 加固失败，继续构建"
+      # Lineage_Hide / KSU selinux_hide 探针加固：用户要求不加入，已移除。
 
       - name: 应用 SUSFS 补丁
         if: ${{ inputs.clean_build != true && inputs.enable_susfs && !(inputs.android_version == 'android17' && inputs.kernel_version == '6.18') }}
@@ -1165,27 +1141,7 @@ jobs:
 
           sed -i 's/check_defconfig//' ./common/build.config.gki
 
-      # ==================== Lineage_Hide procfs 清洗 ====================
-      # null07089/Lineage_Hide 的 patch-kernel.sh：对 uid>=10000 进程，
-      # /proc/<pid>/fd/*、map_files、maps、smaps、numa_maps 输出路径中的
-      # ROM 关键词（lineage/crdroid/aospa/...）等长改写；语义定位、幂等、
-      # 兼容 SUSFS 树。刷类原生（uwuAOSP 等 GSI）时清掉 ROM 指纹。
-      - name: 应用 Lineage_Hide 内核补丁
-        if: ${{ inputs.lineage_hide }}
-        working-directory: ${{ env.KERNEL_ROOT }}
-        run: |
-          set -euo pipefail
-          SCRIPT="$GITHUB_WORKSPACE/lineage_hide/patch-kernel.sh"
-          if [ ! -f "$SCRIPT" ]; then
-            echo "::warning::未找到内置 lineage_hide/patch-kernel.sh，跳过 procfs 清洗"
-            exit 0
-          fi
-          chmod +x "$SCRIPT"
-          if bash "$SCRIPT" ./common; then
-            echo "procfs 清洗补丁已应用（自建补丁）"
-          else
-            echo "::warning::procfs 清洗补丁失败（锚点不匹配），继续构建"
-          fi
+      # Lineage_Hide procfs 路径清洗：用户要求不加入，已移除。
 
       # ==================== 添加 SUSFS 配置 ====================
       # 启用 SUSFS 各项隐藏功能

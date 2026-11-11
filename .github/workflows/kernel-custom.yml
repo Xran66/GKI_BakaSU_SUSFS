@@ -75,7 +75,7 @@ on:
         description: "KSU 版本"
         required: true
         type: choice
-        default: "锁定 10-31（516d3e87，已验证）"
+        default: "跟随 main 最新"
         options:
           - "锁定 10-31（516d3e87，已验证）"
           - "跟随 main 最新"
@@ -118,12 +118,6 @@ on:
         required: false
         type: boolean
         default: false
-      lineage_hide:
-        description: "Lineage_Hide（procfs 路径清洗 + KSU SELinux 探针加固）"
-        required: false
-        type: boolean
-        default: true
-
       # ==================== 可选 ====================
       version:
         description: "自定义版本名（可选，留空自动）"
@@ -214,7 +208,7 @@ jobs:
             echo "| 纯净构建 | ${{ inputs.clean_build }} |"
             echo "| SUSFS | ${{ inputs.cancel_susfs && '关' || '开' }} |"
             echo "| prop_spoof | ${{ inputs.use_prop_spoof }} |"
-            echo "| Lineage_Hide | ${{ inputs.lineage_hide }} |"
+            echo "| Lineage_Hide | 不加入（已移除） |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   build-custom-kernel:
@@ -239,4 +233,3 @@ jobs:
       use_nomount: ${{ inputs.use_nomount || false }}
       use_prop_spoof: ${{ inputs.use_prop_spoof || false }}
       prop_spoof_trace: ${{ inputs.prop_spoof_trace || false }}
-      lineage_hide: ${{ inputs.lineage_hide || false }}
