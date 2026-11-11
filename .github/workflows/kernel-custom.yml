@@ -184,6 +184,18 @@ jobs:
             exit 1
           fi
 
+          # android15-6.6 + prop_spoof = 真机基线锁定路径：
+          # build.yml 会把 kernel/common 锁到设备内核 commit 5d4cdf2ffe45
+          # （Makefile SUBLEVEL=139；设备 uname 6.6.139-android15-8-g5d4cdf2ffe45-4k）。
+          # rolling 分支 tip 探测到的 144 只是分支最新值，不是实际编译源码，
+          # 必须纠正，否则 job 名 / 缓存键 / 子版本判定全部错位。
+          if [ -z "$TAG" ] && [ "$ANDROID_VERSION-$KERNEL_VERSION" = "android15-6.6" ] && \
+             [ "${{ inputs.use_prop_spoof }}" = "true" ] && \
+             { [ "$BASELINE" = "head" ] || [ "$BASELINE" = "lts" ]; }; then
+            echo "prop_spoof 真机基线锁定：子版本强制为 139（分支 tip=$SUB）"
+            SUB=139
+          fi
+
           # ---- 4) KSU 版本 ----
           case "$KSU_SOURCE" in
             锁定*)   KSU="516d3e87fbc986ccefdde2c2765f1700612441a9" ;;
