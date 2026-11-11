@@ -135,6 +135,21 @@ jobs:
         run: |
           echo "Android 17 / 6.18 自动跳过：SUSFS 与 ZRAM/LZ4KD。"
 
+      # ==================== DNS 自愈 ====================
+      # Ubuntu 26.04 runner 偶发解析不了 archive/security.ubuntu.com，
+      # 会让磁盘清理里的 apt 与后续安装依赖步骤一起挂掉。
+      - name: 修复 runner DNS
+        run: |
+          if ! getent hosts github.com >/dev/null 2>&1 || \
+             ! getent hosts archive.ubuntu.com >/dev/null 2>&1; then
+            echo "::warning::runner DNS 解析异常，改用公共 DNS"
+            sudo bash -c 'printf "nameserver 8.8.8.8\nnameserver 1.1.1.1\nnameserver 168.63.129.16\n" > /etc/resolv.conf'
+            sleep 2
+            getent hosts archive.ubuntu.com || echo "::warning::公共 DNS 仍未恢复，依赖步骤将跳过 apt"
+          else
+            echo "DNS 正常"
+          fi
+
       # ==================== 清理磁盘空间 ====================
       # GitHub Actions 默认磁盘空间有限，需要清理不必要的预装软件
       - name: 清理磁盘空间
@@ -206,11 +221,58 @@ jobs:
           fi
 
       # ==================== 安装编译依赖 ====================
-      # 安装内核编译所需的各种工具和库（使用 apt 缓存加速）
+      # runner 镜像（Ubuntu 26.04 resolute）偶发 DNS 故障：
+      # azure.archive.ubuntu.com / archive.ubuntu.com / security.ubuntu.com 全部
+      # "Temporary failure resolving"，apt-get install 拉包 9 分钟后 exit 100，
+      # 整次构建挂在第 9 步。而这些包 runner 本来就预装过（正常构建时 apt 0 upgraded）。
+      # 策略：先自愈 DNS → 检查包状态，全已装就彻底不碰 apt；缺了才带重试安装。
       - name: 安装编译依赖
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ccache python3 git curl build-essential libssl-dev bison flex libelf-dev dwarves
+          set +e
+
+          # ---- 1) DNS 自愈（同一 job 后续 clone 内核源码也受益）----
+          if ! getent hosts archive.ubuntu.com >/dev/null 2>&1 || \
+             ! getent hosts github.com >/dev/null 2>&1; then
+            echo "::warning::runner DNS 解析异常，改用公共 DNS"
+            sudo bash -c 'printf "nameserver 8.8.8.8\nnameserver 1.1.1.1\nnameserver 168.63.129.16\n" > /etc/resolv.conf' 2>/dev/null
+            sleep 2
+          fi
+
+          # ---- 2) 依赖清单：已装则跳过 apt ----
+          PKGS="ccache python3 git curl build-essential libssl-dev bison flex libelf-dev dwarves"
+          MISSING=""
+          for p in $PKGS; do
+            if ! dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q "install ok installed"; then
+              MISSING="$MISSING $p"
+            fi
+          done
+
+          if [ -z "$MISSING" ]; then
+            echo "编译依赖已全部由 runner 预装，跳过 apt（规避镜像站 DNS 故障）"
+          else
+            echo "缺失依赖:$MISSING"
+            for i in 1 2 3; do
+              if sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 update; then break; fi
+              sleep 5
+            done
+            sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends $MISSING
+            RC=$?
+            if [ "$RC" -ne 0 ]; then
+              echo "::warning::apt 返回 $RC，重新核查包状态"
+              for p in $MISSING; do
+                dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q "install ok installed" || {
+                  echo "::error::$p 安装失败且确实缺失"; exit 1;
+                }
+              done
+            fi
+          fi
+
+          # ---- 3) 命令级硬校验 ----
+          for c in ccache python3 git curl make gcc bison flex; do
+            command -v "$c" >/dev/null 2>&1 || { echo "::error::缺少命令 $c"; exit 1; }
+          done
+          command -v pahole >/dev/null 2>&1 || echo "::warning::pahole 不在 PATH（BTF 可能跳过）"
+          echo "依赖检查通过"
 
       # ==================== 配置 ccache ====================
       # ccache 用于缓存编译结果，加速后续构建
