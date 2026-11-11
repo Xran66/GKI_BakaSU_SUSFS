@@ -34,6 +34,7 @@
 #include <linux/cred.h>
 #include <linux/version.h>
 #include <linux/mm.h>
+#include <linux/fs.h>
 #include <linux/dcache.h>
 #include <linux/mm_inline.h>
 #include <linux/security.h>
@@ -780,17 +781,43 @@ __maybe_unused static void patch_target_mm(void)
 	vma_iter_init(&vmi, mm, 0);
 	for_each_vma(vmi, vma) {
 		struct prop_hook *h;
+		struct address_space *old_mapping, *new_mapping;
+		struct file *fake;
 
 		if (!vma->vm_file)
 			continue;
 		h = prop_hook_find(vma->vm_file->f_inode);
 		if (!h || !h->fake_file)
 			continue;
-		vma_set_file(vma, h->fake_file);
-		/* 清旧页：vma_set_file 只换指针不挪 i_mmap，目标 vma 仍挂在
-		 * 真文件的 i_mmap 上 —— 对真 inode 反向 unmap 才能清掉旧 PTE；
-		 * 目标进程重 fault 走新的假文件，其他进程重 fault 仍是真内容 */
-		unmap_mapping_range(h->inode->i_mapping, 0, 0, 1);
+		fake = h->fake_file;
+		old_mapping = vma->vm_file->f_mapping;
+		new_mapping = fake->f_mapping;
+		if (!old_mapping || !new_mapping || old_mapping == new_mapping)
+			continue;
+
+		/* vma_set_file 只换 vm_file，不挪 i_mmap interval tree。
+		 * 必须先从真 inode 树摘下、换指针、再插到假 inode 树，否则
+		 * rb_node 仍挂在真树上：unmap_mapping_range / __split_vma /
+		 * vma_interval_tree_insert 全部会踩坏树（实测 panic）。
+		 * 锁序与 vma_link 一致：mmap_lock(写) 在外、i_mmap_rwsem 在内。*/
+		if (vma->vm_flags & VM_SHARED) {
+			i_mmap_lock_write(old_mapping);
+			vma_interval_tree_remove(vma, &old_mapping->i_mmap);
+			i_mmap_unlock_write(old_mapping);
+		}
+
+		vma_set_file(vma, fake);
+
+		if (vma->vm_flags & VM_SHARED) {
+			i_mmap_lock_write(new_mapping);
+			vma_interval_tree_insert(vma, &new_mapping->i_mmap);
+			i_mmap_unlock_write(new_mapping);
+		}
+
+		/* 只清本进程该 vma 的 PTE，重 fault 走假文件；不再对真 inode
+		 * 全量 unmap_mapping_range（会扫所有进程并在 mmap_lock 写锁下
+		 * 重入 zap 路径，本次 panic 的 pc 就是 zap_huge_pmd）。*/
+		zap_vma_pages(vma);
 		patched++;
 	}
 	up_write(&mm->mmap_lock);
