@@ -982,6 +982,42 @@ jobs:
             fi
           fi
 
+      # ==================== SELinux 状态一致性加固 ====================
+      # 针对 AppZygote raw selinuxfs 探测（DirtySepolicy / Duck-Detector 一族）：
+      #  1) services.c：app_zygote 的 context 有效性 / AV 计算改走 backup_sepolicy
+      #     （BakaSU 在注入自身 sepolicy 规则前留的干净策略副本），并保留 live
+      #     avd.seqno；覆盖绕过 selinuxfs 字符接口、直接走 Framework 的查询。
+      #  2) BakaSU selinux_hide.c：fake status 页的 sequence/policyload 与
+      #     /sys/fs/selinux/access 回填的 avd.seqno 同源，消除
+      #     "status.sequence/policyload unexpected" 指纹。
+      # 补丁基于真机基线 5d4cdf2ffe45 (android15-6.6.139) 的 services.c 生成。
+      - name: 应用 SELinux 状态一致性加固
+        if: ${{ inputs.clean_build != true && inputs.ksu_variant == 'BakaSU' && inputs.android_version == 'android15' && inputs.kernel_version == '6.6' }}
+        working-directory: ${{ env.KERNEL_ROOT }}
+        run: |
+          set -euo pipefail
+          echo "应用 SELinux 状态一致性加固（android15-6.6 / BakaSU）..."
+
+          cd ./common
+          cp "$GITHUB_WORKSPACE/selinux_hide/70_selinux_hide_policy_query-6.6.patch" ./selinux_hide_policy.patch
+          if grep -q 'selinux_hide_av_query_rules' security/selinux/ss/services.c; then
+            echo "services.c 已含过滤逻辑，跳过"
+          else
+            patch -p1 --forward --fuzz=3 < ./selinux_hide_policy.patch
+            grep -q 'selinux_hide_av_query_rules' security/selinux/ss/services.c || {
+              echo "::error::SELinux 策略过滤补丁应用失败"; exit 1;
+            }
+          fi
+          rm -f ./selinux_hide_policy.patch
+          echo "--- services.c 过滤函数 ---"
+          grep -c 'selinux_hide_av_query_rules' security/selinux/ss/services.c
+          cd ..
+
+          python3 "$GITHUB_WORKSPACE/selinux_hide/fix_ksu_seqno.py" \
+            KernelSU/kernel/feature/selinux_hide.c
+          echo "--- BakaSU seqno 同源点 ---"
+          grep -n 'ksu_hidden_policy_seqno' KernelSU/kernel/feature/selinux_hide.c | head -5
+
       # ==================== 集成 prop_spoof 属性伪装（内建） ====================
       # 把 prop_spoof.c 编进 vmlinux（obj-y），不在 /proc/modules 留模块痕迹。
       # 参数不走 insmod：内核只在 device_initcall 建 /proc/prop_spoof(_cfg)，
