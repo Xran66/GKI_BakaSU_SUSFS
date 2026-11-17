@@ -263,8 +263,10 @@ unsigned long kairos_read_to_kbuf(struct mm_struct *mm, unsigned long va,
 		rcu_read_lock();
 		if (kairos_va_to_pa(mm, va + done, false, &v) &&
 		    kairos_pte_still_same(&v)) {
+			/* 注意：v.pa 里**已经带了页内偏移**（va & ~PAGE_MASK），
+			 * 这里不能再加 page_off，否则会读到 pa + 2*offset。 */
 			memcpy((char *)kbuf + done,
-			       (char *)phys_to_virt(v.pa) + page_off, n);
+			       (char *)phys_to_virt(v.pa), n);
 			ok = true;
 		} else {
 			/* 未建立或已换出：取 swap entry */
@@ -345,7 +347,8 @@ static unsigned long kairos_write_fast(struct mm_struct *mm, unsigned long va,
 			break;
 		}
 
-		memcpy((char *)phys_to_virt(v.pa) + page_off,
+		/* 同上：v.pa 已含页内偏移 */
+		memcpy((char *)phys_to_virt(v.pa),
 		       (const char *)kbuf + done, n);
 		set_page_dirty(page);
 		rcu_read_unlock();
