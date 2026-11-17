@@ -26,6 +26,10 @@
 #define kairos_err(fmt, ...)	pr_err_ratelimited("kairos: " fmt, ##__VA_ARGS__)
 
 #define KAIROS_MAX_REQ		0xFF
+/* 客户端用 reboot() 做隐蔽握手拿 ghost fd 时使用的私有 magic
+ * （原版 reboot_handler_pre @0x6284 里的字面量，不是任何标准 reboot 常量）*/
+#define KAIROS_BOOT_MAGIC1	0x48931414
+#define KAIROS_BOOT_MAGIC3	0x51239123
 #define KAIROS_KEY_LEN		64
 #define KAIROS_MAGIC_REPLY	1102
 
@@ -72,6 +76,7 @@ enum kairos_op {
 struct kairos_ctx {
 	u8			authed;
 	u32			magic;
+	int			fd;		/* 下发出去的 fd，幂等重发时回给客户端 */
 	struct mm_struct	*mm;
 	u32			mm_pid;
 };
@@ -95,17 +100,27 @@ unsigned long kairos_read_to_kbuf(struct mm_struct *mm, unsigned long va,
 unsigned long kairos_write_to_mm(struct mm_struct *mm, unsigned long va,
 				 const void *kbuf, unsigned long len, bool safe);
 
+/* ---- lifecycle ---- */
+void kairos_shutdown_locked(void);
+
 /* ---- ioctl ---- */
 long kairos_dispatch(struct file *file, u32 magic, u32 op, void __user *arg);
 
 /* ---- 从被 patch 的内核源码里调用（见 patches/）---- */
-int  kairos_hook_sendto(struct pt_regs *regs, void __user *msg, int len);
-void kairos_hook_reboot(int magic1, int magic2);
+/*
+ * net/socket.c:__sys_sendto() 注入点直接调这个，参数就是原始的
+ * (void __user *buff, size_t len)。必须在 import_single_range() 之前调用，
+ * 因为我们要改的是用户缓冲本身，而不是已经 import 好的 iov_iter。
+ * 内部先做廉价的长度/类型预筛，非陀螺仪包几乎零开销返回。
+ */
+void kairos_hook_sendto_buf(void __user *buf, size_t len);
+bool kairos_hook_reboot(int magic1, int magic2, unsigned int cmd,
+			void __user *arg);
+void kairos_gyro_set(int enable, int mode, int sx, int sy, int mask);
 
-/* ---- 供内核其它子系统查询是否已初始化 ---- */
-static inline bool kairos_active(void)
-{
-	return READ_ONCE(kairos_initialized);
-}
+/* ---- 供内核其它子系统查询是否已初始化 ----
+ * 必须是真函数（不能 static inline）：被 patch 的 net/socket.c 和
+ * kernel/reboot.c 会 extern 引用它，inline 版在那些 TU 里没有符号。 */
+bool kairos_active(void);
 
 #endif /* _KAIROS_H */
