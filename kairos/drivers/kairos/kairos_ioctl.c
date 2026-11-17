@@ -103,7 +103,8 @@ long kairos_dispatch(struct file *file, u32 magic, u32 op, void __user *uarg)
 
 	switch (op) {
 	case KOP_AUTH:
-		if (copy_from_user(buf, uarg, KAIROS_MAX_REQ))
+		/* 原版固定读 64 字节；读 255 会越过客户端的小缓冲 */
+		if (copy_from_user(buf, uarg, KAIROS_KEY_LEN))
 			return -EFAULT;
 		if (kairos_auth_check(buf))	/* 算法见 kairos_auth.c / decomp_all.md */
 			return -EACCES;
@@ -164,6 +165,9 @@ long kairos_dispatch(struct file *file, u32 magic, u32 op, void __user *uarg)
 	case KOP_GET_SIGSEGV:
 		return -EOPNOTSUPP;
 
+	/* 0x801/0x802/0x803 在原版里是"设置目标进程"类命令（写 ctx->mm_pid），
+	 * 具体字段布局还没从 dispatch_request 里逐条核对，这里只做参数探测，
+	 * 不落任何状态 —— 避免用错的布局把 mm 引用搞坏。 */
 	case KOP_0x801:
 	case KOP_0x8D1:
 	case KOP_0x802:
@@ -232,7 +236,9 @@ static int kairos_release(struct inode *inode, struct file *file)
 }
 
 const struct file_operations kairos_fops = {
-	.owner		= THIS_MODULE,
+#ifdef MODULE
+	.owner		= THIS_MODULE,	/* built-in 时 THIS_MODULE 为 NULL，没必要写 */
+#endif
 	.unlocked_ioctl	= kairos_ioctl,
 	.release	= kairos_release,
 };
