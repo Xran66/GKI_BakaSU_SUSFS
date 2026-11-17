@@ -40,6 +40,20 @@ struct kairos_req {
 	__u64 arg;
 };
 
+/*
+ * 陀螺仪运行期参数（KOP_0x8B0）。
+ * 原版是靠某条 ioctl 直接写全局变量；built-in 后不能用 module_param
+ * （会在 /sys/module/kernel/parameters/ 下露出来），所以走这条 op。
+ * scale_x/scale_y 是百分比：100 = 原值不改写。
+ */
+struct kairos_gyro_cfg {
+	__s32	enable;
+	__s32	mode;		/* 0 正常 / 1 XY互换取反 / 2 双取反 / 3 只互换 */
+	__s32	scale_x;
+	__s32	scale_y;
+	__s32	type_mask;	/* bit0: type 4, bit1: type 16 */
+};
+
 enum kairos_op {
 	KOP_AUTH		= 0x800,
 	KOP_0x801		= 0x801,
