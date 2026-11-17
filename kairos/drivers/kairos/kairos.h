@@ -116,6 +116,7 @@ unsigned long kairos_write_to_mm(struct mm_struct *mm, unsigned long va,
 
 /* ---- lifecycle ---- */
 void kairos_shutdown_locked(void);
+void kairos_release_ctx(void);
 
 /* ---- ioctl ---- */
 long kairos_dispatch(struct file *file, u32 magic, u32 op, void __user *arg);
