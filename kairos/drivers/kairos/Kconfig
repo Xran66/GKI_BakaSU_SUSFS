@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Kairos 内核内置版（原 K_KAIROS.ko 的 in-tree 移植）
+#
+config KAIROS
+	bool "Kairos driver (built-in)"
+	depends on ARM64
+	default n
+	help
+	  In-tree port of the Kairos driver. Compiled into the kernel image
+	  instead of being loaded as an out-of-tree module.
+
+	  Compared to the .ko version this removes: module self-hiding,
+	  kprobe-based symbol bootstrap, and all hard-coded struct offsets.
+	  Hooks are placed by source patching (see patches/), so nothing
+	  appears in /sys/kernel/debug/kprobes/list.
+
+	  If unsure, say N.
+
+config KAIROS_GYRO_HOOK
+	bool "Kairos: hook __sys_sendto for gyro injection"
+	depends on KAIROS
+	default y
+	help
+	  Patches net/socket.c:__sys_sendto() to call into the driver so it can
+	  rewrite gyroscope samples. Requires the matching source patch.
+
+config KAIROS_DEBUG
+	bool "Kairos: verbose logging"
+	depends on KAIROS
+	default n
+	help
+	  Keep this OFF for production. Every pr_info()/pr_debug() shows up in
+	  dmesg, which is a trivially readable detection surface.
