@@ -3,7 +3,7 @@
 # Kairos 内核内置版（原 K_KAIROS.ko 的 in-tree 移植）
 #
 config KAIROS
-	bool "Kairos driver (built-in)"
+	tristate "Kairos driver"
 	depends on ARM64
 	default n
 	help
