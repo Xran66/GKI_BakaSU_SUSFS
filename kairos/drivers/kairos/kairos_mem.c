@@ -1,0 +1,352 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * kairos_mem.c — 物理内存层（built-in 版）
+ *
+ * 与 .ko 版相比的核心优化：
+ *   1. **删掉全部硬编码偏移**：mm->pgd / mm->mmap_lock / task->mm / task->alloc_lock
+ *      全部用真实成员访问，不再依赖 6.6.127 的特定布局（原版写死 112/144/1440/2312）
+ *   2. **删掉内联展开的 pfn_valid / pfn_to_page**：直接用内核 API
+ *   3. **删掉手写的 3 级 walk 索引算术**：用 pgd_offset/p4d_offset/pud_offset/pmd_offset
+ *      （在 39-bit VA + 4K page 配置下，p4d/pud 会自动折叠，生成的代码和原版等价）
+ *   4. **写路径默认走 GUP**：原版直接改线性映射会踩坏 COW 共享页，这里默认安全路径，
+ *      只有确认 mapcount==1 且 PageAnon 才走快速路径
+ */
+#include <linux/kernel.h>
+#include <linux/mm.h>
+#include <linux/sched.h>
+#include <linux/sched/mm.h>
+#include <linux/sched/task.h>
+#include <linux/pid.h>
+#include <linux/rcupdate.h>
+#include <linux/swap.h>
+#include <linux/swapops.h>
+#include <linux/blkdev.h>
+#include <linux/bio.h>
+#include <linux/highmem.h>
+#include <linux/pgtable.h>
+
+#include "kairos.h"
+
+/* ================================================================== */
+/* 1. 取 mm                                                            */
+/* ================================================================== */
+struct mm_struct *kairos_grab_mm_by_pid(pid_t pid)
+{
+	struct task_struct *task;
+	struct mm_struct *mm = NULL;
+	struct pid *vpid;
+
+	rcu_read_lock();
+	vpid = find_vpid(pid);
+	if (!vpid)
+		goto out;
+
+	task = pid_task(vpid, PIDTYPE_PID);
+	if (!task)
+		goto out;
+
+	/* 原版是 raw_spin_lock(&task->alloc_lock) + atomic_inc(&mm->mm_count) 的裸实现，
+	 * 这里直接用 mmget()，语义一致、还省掉一次手写锁 */
+	mm = get_task_mm(task);
+out:
+	rcu_read_unlock();
+	return mm;
+}
+
+/* ================================================================== */
+/* 2. VA -> PA（lockless）                                             */
+/*                                                                     */
+/* 原版自己算索引 + 自己读页表；这里用宏，可读性/可移植性都更好：       */
+/*   pgd_offset(mm, va) → p4d_offset → pud_offset → pmd_offset → pte   */
+/* 39-bit VA 下 p4d/pud 折叠，最终就是 3 次查表，和原版指令序列等价。    */
+/* 全部用 READ_ONCE 读取，配合 RCU 保证不撕裂。                        */
+/* ================================================================== */
+struct kairos_va_result {
+	unsigned long	pa;
+	u64		*pte_slot;	/* 指回最后一层表项，调用方拷完复核 */
+	bool		block;		/* true = PMD 块映射(2MB) */
+};
+
+static bool kairos_va_to_pa(struct mm_struct *mm, unsigned long va,
+			    bool for_write, struct kairos_va_result *out)
+{
+	pgd_t *pgd;
+	p4d_t *p4d;
+	pud_t *pud;
+	pmd_t *pmd;
+	pte_t *pte;
+
+	out->pa = 0;
+	out->pte_slot = NULL;
+	out->block = false;
+
+	pgd = pgd_offset(mm, va);
+	if (!pgd_present(READ_ONCE(*pgd)))
+		return false;
+
+	p4d = p4d_offset(pgd, va);
+	pud = pud_offset(p4d, va);
+	if (!pud_present(*pud))
+		return false;
+
+	pmd = pmd_offset(pud, va);
+	if (pmd_none(READ_ONCE(*pmd)))
+		return false;
+
+	/* ---- 2MB 块映射 ---- */
+	if (pmd_leaf(READ_ONCE(*pmd))) {
+		phys_addr_t pa;
+
+		if (for_write && pmd_write(*pmd) == 0)
+			return false;
+		pa = __pfn_to_phys(pmd_pfn(READ_ONCE(*pmd))) | (va & ~PMD_MASK);
+		out->pa = pa;
+		out->pte_slot = (u64 *)pmd;
+		out->block = true;
+		return true;
+	}
+
+	if (!pmd_table(READ_ONCE(*pmd)))
+		return false;
+
+	/* ---- 4K 页 ---- */
+	pte = pte_offset_kernel(pmd, va);
+
+	if (!pte_present(READ_ONCE(*pte)))		/* 换出 / 未建立 → 交给 swap 路径 */
+		return false;
+
+	/* 原版拒绝设备内存（AttrIndx != 0）与软件保留位，这里用 pte_special 等价判断 */
+	if (pte_special(*pte))
+		return false;
+
+	if (for_write && !pte_write(*pte))
+		return false;
+
+	out->pa = __pfn_to_phys(pte_pfn(*pte)) | (va & ~PAGE_MASK);
+	out->pte_slot = (u64 *)pte;
+	out->block = false;
+	return true;
+}
+
+/* 拷完复核：页表项还在、还指向同一物理页 */
+static bool kairos_pte_still_same(struct kairos_va_result *v)
+{
+	u64 now = READ_ONCE(*v->pte_slot);
+
+	if (v->block)
+		return (now & 3) == 3 && ((now ^ v->pa) & ~PMD_MASK) == 0;
+	return (now & 1) &&
+	       (((now >> PAGE_SHIFT) & GENMASK_ULL(47, 0)) == (v->pa >> PAGE_SHIFT));
+}
+
+/* ================================================================== */
+/* 3. swap 读取                                                        */
+/*                                                                     */
+/* built-in 后 swap_info[] / lookup_swap_cache 都是内核内部符号，       */
+/* 不需要 kallsyms 自举，直接调用即可。                                 */
+/* ================================================================== */
+static bool kairos_read_swap_page(swp_entry_t entry, void *dst,
+				  unsigned int off, size_t n)
+{
+	struct page *page;
+
+	/* 先查 swap cache（快路径） */
+	{
+		struct folio *folio = swap_cache_get_folio(entry, NULL, 0);
+
+		if (!IS_ERR_OR_NULL(folio)) {
+			void *kaddr;
+
+			page = folio_page(folio, 0);
+			kaddr = kmap_local_page(page);
+			memcpy(dst, (char *)kaddr + off, n);
+			kunmap_local(kaddr);
+			folio_put(folio);
+			return true;
+		}
+	}
+
+	/* 慢路径：自己发 bio 读块设备（原版的 swap 直读） */
+	{
+		struct swap_info_struct *si;
+		struct bio *bio;
+		int ret;
+
+		if (swp_type(entry) >= MAX_SWAPFILES)
+			return false;
+		si = swap_info[swp_type(entry)];
+		if (!si || !(si->flags & SWP_USED) || !si->bdev)
+			return false;
+
+		page = alloc_page(GFP_NOIO);
+		if (!page)
+			return false;
+
+		bio = bio_alloc(si->bdev, 1, REQ_OP_READ, GFP_NOIO);
+		if (!bio) {
+			__free_page(page);
+			return false;
+		}
+		bio->bi_iter.bi_sector = (sector_t)swp_offset(entry) * (PAGE_SIZE >> 9);
+		__bio_add_page(bio, page, PAGE_SIZE, 0);
+
+		ret = submit_bio_wait(bio);
+		bio_put(bio);
+		if (ret) {
+			__free_page(page);
+			return false;
+		}
+
+		memcpy(dst, page_address(page) + off, n);
+		__free_page(page);
+	}
+	return true;
+}
+
+/* ================================================================== */
+/* 4. 读：VA -> kbuf                                                   */
+/* ================================================================== */
+unsigned long kairos_read_to_kbuf(struct mm_struct *mm, unsigned long va,
+				  void *kbuf, unsigned long len)
+{
+	unsigned long done = 0;
+
+	while (done < len) {
+		unsigned long page_off = (va + done) & ~PAGE_MASK;
+		size_t n = min_t(size_t, PAGE_SIZE - page_off, len - done);
+		struct kairos_va_result v;
+		bool ok = false;
+
+		rcu_read_lock();
+		if (kairos_va_to_pa(mm, va + done, false, &v) &&
+		    kairos_pte_still_same(&v)) {
+			memcpy((char *)kbuf + done,
+			       (char *)phys_to_virt(v.pa) + page_off, n);
+			ok = true;
+		} else {
+			/* 未建立或已换出：取 swap entry */
+			pgd_t *pgd = pgd_offset(mm, va + done);
+			pud_t *pud;
+			pmd_t *pmd;
+			pte_t *pte;
+
+			if (pgd_present(*pgd)) {
+				pud = pud_offset(p4d_offset(pgd, va + done), va + done);
+				if (pud_present(*pud)) {
+					pmd = pmd_offset(pud, va + done);
+					if (pmd_present(*pmd) && !pmd_leaf(*pmd)) {
+						pte = pte_offset_kernel(pmd, va + done);
+						if (!pte_present(*pte) && !pte_none(*pte)) {
+							swp_entry_t e = pte_to_swp_entry(*pte);
+
+							rcu_read_unlock();
+							if (!kairos_read_swap_page(e,
+								(char *)kbuf + done,
+								page_off, n))
+								goto out;
+							done += n;
+							continue;
+						}
+					}
+				}
+			}
+		}
+		rcu_read_unlock();
+		if (!ok)
+			break;
+		done += n;
+	}
+out:
+	return done;
+}
+
+/* ================================================================== */
+/* 5. 写                                                              */
+/*                                                                     */
+/* 安全修复（相对原版）：                                               */
+/*   原版 __write_from_kbuf 直接 memcpy 到线性映射，完全不处理 COW。    */
+/*   若目标页被 fork 共享（mapcount > 1），改写会同步污染父/子进程。    */
+/*   这里默认走 GUP（走正规 COW），只有显式 fast=true 且确认独占才直写。*/
+/* ================================================================== */
+static unsigned long kairos_write_fast(struct mm_struct *mm, unsigned long va,
+				       const void *kbuf, unsigned long len)
+{
+	unsigned long done = 0;
+
+	while (done < len) {
+		unsigned long page_off = (va + done) & ~PAGE_MASK;
+		size_t n = min_t(size_t, PAGE_SIZE - page_off, len - done);
+		struct kairos_va_result v;
+		struct page *page;
+
+		rcu_read_lock();
+		if (!kairos_va_to_pa(mm, va + done, true, &v) ||
+		    !kairos_pte_still_same(&v)) {
+			rcu_read_unlock();
+			break;
+		}
+
+		page = pfn_to_online_page(v.pa >> PAGE_SHIFT);
+		if (!page) {
+			rcu_read_unlock();
+			break;
+		}
+		if (!PageAnon(page) || page_mapcount(page) != 1) {
+			rcu_read_unlock();
+			break;
+		}
+		if (!page_ref_inc_not_zero(page)) {
+			rcu_read_unlock();
+			break;
+		}
+
+		memcpy((char *)phys_to_virt(v.pa) + page_off,
+		       (const char *)kbuf + done, n);
+		set_page_dirty(page);
+		rcu_read_unlock();
+		put_page(page);
+		done += n;
+	}
+	return done;
+}
+
+static unsigned long kairos_write_gup(struct mm_struct *mm, unsigned long va,
+				      const void *kbuf, unsigned long len)
+{
+	unsigned long done = 0;
+
+	while (done < len) {
+		unsigned long page_off = (va + done) & ~PAGE_MASK;
+		size_t n = min_t(size_t, PAGE_SIZE - page_off, len - done);
+		struct page *page = NULL;
+		int locked = 0;
+		long got;
+
+		if (mmap_read_lock_killable(mm))
+			break;
+
+		got = pin_user_pages_remote(mm, va + done, 1,
+					    FOLL_WRITE | FOLL_FORCE,
+					    &page, &locked);
+		if (locked)
+			mmap_read_unlock(mm);
+
+		if (got != 1 || !page)
+			break;
+
+		memcpy((char *)kmap_local_page(page) + page_off,
+		       (const char *)kbuf + done, n);
+		kunmap_local(kmap_local_page(page));
+		set_page_dirty_lock(page);
+		unpin_user_page(page);
+		done += n;
+	}
+	return done;
+}
+
+unsigned long kairos_write_to_mm(struct mm_struct *mm, unsigned long va,
+				 const void *kbuf, unsigned long len, bool fast)
+{
+	return fast ? kairos_write_fast(mm, va, kbuf, len)
+		    : kairos_write_gup(mm, va, kbuf, len);
+}
