@@ -322,7 +322,9 @@ static unsigned long kairos_write_fast(struct mm_struct *mm, unsigned long va,
 			rcu_read_unlock();
 			break;
 		}
-		if (!page_ref_inc_not_zero(page)) {
+		/* 6.6 没有 page_ref_inc_not_zero()，等价的公开 API 是
+		 * get_page_unless_zero()（内部就是 page_ref_add_unless(page,1,0)） */
+		if (!get_page_unless_zero(page)) {
 			rcu_read_unlock();
 			break;
 		}
