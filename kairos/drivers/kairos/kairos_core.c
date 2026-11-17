@@ -3,13 +3,13 @@
  * kairos_core.c — 生命周期 + ghost fd 下发 + 源码级 hook 入口
  *
  * 相对 .ko 版删掉的东西（built-in 后都是多余的，且本身就是暴露面）：
- *   ✗ hide_module_work_fn / schedule_hide      —— 内核本体不在 module list 里，无需隐藏
+ *   ✗ hide_module_work_fn / schedule_hide      —— 内核本体不在 module list 里
  *   ✗ list_del_rcu / kobject_del / module_mutex —— 同上
- *   ✗ kairos_kallsyms_lookup_name() 自举        —— 内核内部符号可直接引用
- *   ✗ register_kprobe(__arm64_sys_reboot)       —— 改为 patch kernel/reboot.c 直接调用
- *   ✗ register_kprobe(__arm64_sys_sendto)       —— 改为 patch net/socket.c 直接调用
- *   ✗ "disabled N kprobe blacklist entries"     —— 不再需要动 kprobe 黑名单
- *   ✗ task_work_add 自举                        —— 直接用 task_work_add()
+ *   ✗ kairos_kallsyms_lookup_name() 自举        —— 内部符号可直接引用
+ *   ✗ register_kprobe(__arm64_sys_reboot)       —— 改为 patch kernel/reboot.c
+ *   ✗ register_kprobe(__arm64_sys_sendto)       —— 改为 patch net/socket.c
+ *   ✗ "disabled N kprobe blacklist entries"     —— 不再动 kprobe 黑名单
+ *   ✗ task_work_add 回传 fd 信息                —— 直接 copy_to_user 更简单
  * 保留的东西：
  *   ✓ anon_inode_getfile("[eventpoll]") 下发 fd —— 与现有客户端 ABI 完全兼容
  *   ✓ 全部 ioctl 命令号 / req 结构 / magic 校验
@@ -19,6 +19,8 @@
 #include <linux/slab.h>
 #include <linux/sched.h>
 #include <linux/sched/task.h>
+#include <linux/sched/mm.h>	/* mmput */
+#include <linux/rwsem.h>	/* init_rwsem */
 #include <linux/anon_inodes.h>
 #include <linux/file.h>
 #include <linux/fdtable.h>
@@ -26,88 +28,94 @@
 #include <linux/rcupdate.h>
 #include <linux/mutex.h>
 #include <linux/version.h>
-#include <net/sock.h>
+#include <linux/reboot.h>
 #include <linux/syscalls.h>
 
 #include "kairos.h"
 
 u8 kairos_initialized;
 struct rw_semaphore kairos_lifecycle_sem;
-struct kairos_ctx *g_ctx;	/* 单个全局实例，比 .ko 版更省内存 */
+struct kairos_ctx *g_ctx;	/* 单个全局实例 */
+/* install 只可能被调一次，用 mutex 而不是 spinlock：里面要 kzalloc(GFP_KERNEL) */
+static DEFINE_MUTEX(kairos_install_mutex);
+
+bool kairos_active(void)
+{
+	return READ_ONCE(kairos_initialized) != 0;
+}
 
 /* ================================================================== */
 /* ghost fd                                                            */
 /*                                                                     */
-/* 保留 "[eventpoll]" 名字：客户端的 find_fd_by_devt_in_proc 依赖这个   */
-/* 形态在 /proc/self/fd 里认出它。改成 netlink 或隐藏 ioctl 会让现有     */
-/* 客户端二进制失效 —— 除非同时改客户端，否则这里不动。                  */
+/* 保留 "[eventpoll]" 名字：客户端的 find_fd_by_devt_in_proc 靠这个形态 */
+/* 在 /proc/self/fd 里认出它。改成 netlink 或隐藏 ioctl 会让现有客户端  */
+/* 二进制失效 —— 除非同时改客户端，否则这里不动。                        */
+/*                                                                     */
+/* ctx 的生命周期只归 file->private_data 管：install 时分配、release 时 */
+/* 释放。shutdown 只清 mm 引用，绝不 kfree —— 否则和 release 撞成双重   */
+/* 释放（.ko 版原代码就有这个洞）。                                      */
 /* ================================================================== */
-struct kairos_install_work {
-	struct callback_head	twork;
-	void __user		*out;
-	struct { u32 fd; u32 magic; } result;
-};
-
-static void kairos_install_tw(struct callback_head *t)
-{
-	struct kairos_install_work *w =
-		container_of(t, struct kairos_install_work, twork);
-
-	if (w->out)
-		copy_to_user(w->out, &w->result, 8);
-	kfree(w);
-}
-
 static long kairos_install_fd(void __user *out)
 {
-	struct kairos_install_work *w;
-	struct kairos_ctx *ctx;
+	struct kairos_ctx *ctx, *old;
 	struct file *f;
 	int fd, magic;
+	u32 reply[2];
 
-	if (READ_ONCE(g_ctx))		/* 幂等：已有实例就直接复用 */
-		return -EBUSY;
+	mutex_lock(&kairos_install_mutex);
+	old = READ_ONCE(g_ctx);
+	if (old) {			/* 幂等：已有实例就把 fd/magic 再给它一次 */
+		reply[0] = (u32)old->fd;
+		reply[1] = old->magic;
+		mutex_unlock(&kairos_install_mutex);
+		if (copy_to_user(out, reply, sizeof(reply)))
+			return -EFAULT;
+		return 0;
+	}
 
 	fd = get_unused_fd_flags(O_CLOEXEC);
-	if (fd < 0)
+	if (fd < 0) {
+		mutex_unlock(&kairos_install_mutex);
 		return fd;
-
-	f = anon_inode_getfile("[eventpoll]", &kairos_fops, NULL, O_RDWR | O_CLOEXEC);
-	if (IS_ERR(f)) {
-		put_unused_fd(fd);
-		return PTR_ERR(f);
 	}
 
 	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
 	if (!ctx) {
-		fput(f);
 		put_unused_fd(fd);
+		mutex_unlock(&kairos_install_mutex);
 		return -ENOMEM;
 	}
+
+	f = anon_inode_getfile("[eventpoll]", &kairos_fops, ctx,
+			       O_RDWR | O_CLOEXEC);
+	if (IS_ERR(f)) {
+		kfree(ctx);
+		put_unused_fd(fd);
+		mutex_unlock(&kairos_install_mutex);
+		return PTR_ERR(f);
+	}
+
 	do {
 		magic = get_random_u32();
 	} while (!magic);
-	ctx->magic = magic;
+	ctx->magic = (u32)magic;
+	ctx->fd = fd;
 
-	f->private_data = ctx;
-	WRITE_ONCE(g_ctx, ctx);
 	fd_install(fd, f);
+	WRITE_ONCE(g_ctx, ctx);
 
-	w = kmalloc(sizeof(*w), GFP_KERNEL);
-	if (!w)
-		return 0;
-	w->result.fd = fd;
-	w->result.magic = magic;
-	w->out = out;
-	init_task_work(&w->twork, kairos_install_tw);
-	if (task_work_add(current, &w->twork, TWA_RESUME))
-		kfree(w);
+	reply[0] = (u32)fd;
+	reply[1] = (u32)magic;
+	mutex_unlock(&kairos_install_mutex);
 
+	if (copy_to_user(out, reply, sizeof(reply)))
+		return -EFAULT;
 	return 0;
 }
 
 /* ================================================================== */
 /* 关停（供 OP_EXIT 与 reboot hook 调用）                              */
+/* 只解绑，不释放 ctx —— ctx 归 file 所有，release 时才 free。          */
 /* ================================================================== */
 void kairos_shutdown_locked(void)
 {
@@ -117,62 +125,53 @@ void kairos_shutdown_locked(void)
 		return;
 	WRITE_ONCE(kairos_initialized, 0);
 
-	ctx = xchg(&g_ctx, NULL);
+	ctx = xchg(&g_ctx, (struct kairos_ctx *)NULL);
 	if (ctx) {
+		ctx->authed = 0;
+		ctx->magic = 0;
 		if (ctx->mm) {
-			mmput(ctx->mm);	/* .ko 版用 mmdrop，这里用配对的 mmput */
+			mmput(ctx->mm);
 			ctx->mm = NULL;
+			ctx->mm_pid = 0;
 		}
-		kfree(ctx);
 	}
 }
 
 /* ================================================================== */
-/* 源码级 hook 入口（由 patches/ 里的 diff 插入调用点）                  */
+/* 源码级 hook 入口（由 patches/inject_hooks.py 插入调用点）            */
 /* ================================================================== */
-#ifdef CONFIG_KAIROS_GYRO_HOOK
 /*
- * 在 net/socket.c:__sys_sendto() 入口调用。
- * 原版是靠 kprobe pre_handler 拿到 regs 再改用户缓冲区；built-in 后
- * 我们有完整的 C 上下文，直接改 __user 缓冲即可，且不污染 kprobe 表。
+ * 客户端拿 ghost fd 的真实握手方式（从 reboot_handler_pre @0x6284 解出来的）：
  *
- * 返回：可能被修改后的 iov 长度（不改就原样返回）
+ *     reboot(0x48931414, 任意, 0x51239123, &result);
+ *
+ * 原版用 kprobe 挂在 __arm64_sys_reboot 的 pre_handler 上，判断
+ *   regs->x0 低 32 位 == 0x48931414  且  regs->x2 低 32 位 == 0x51239123
+ * 成立就不执行真正的 reboot，而是 task_work_add 把 ghost fd 装进当前进程，
+ * 再把 {fd, magic} 写回 regs->x3 指向的用户缓冲。
+ *
+ * 也就是说 reboot() 在这里被当成一个隐蔽信令通道用 —— 参数看起来像
+ * 标准 reboot magic，实际是私有握手，而且永远不会真的重启。
+ *
+ * 返回 true 表示已接管（调用方要 return 0，不要继续走 reboot 主体）。
  */
-size_t kairos_hook_sendto(struct socket *sock, struct user_msghdr *umsg,
-			  size_t len)
+bool kairos_hook_reboot(int magic1, int magic2, unsigned int cmd,
+			void __user *arg)
 {
-	struct kairos_gyro_hdr hdr;
-	void __user *data;
-	unsigned int seq;
+	if (magic1 == KAIROS_BOOT_MAGIC1 && cmd == KAIROS_BOOT_MAGIC3) {
+		/* 隐蔽握手：只装 fd，绝不重启 */
+		long r = kairos_install_fd(arg);
 
-	if (!kairos_active())
-		return len;
+		return true;	/* (void)r：客户端只看 arg 里的 fd/magic */
+	}
 
-	if (copy_from_user(&hdr, umsg, sizeof(hdr)))
-		return len;
-
-	/* 只处理陀螺仪 UDP 特征包，其余原样放行 */
-	if (!kairos_is_gyro_packet(&hdr, len))
-		return len;
-
-	data = (void __user *)(unsigned long)hdr.iov_base;
-	seq = kairos_gyro_stamp();
-	if (kairos_gyro_patch(seq, data, len) < 0)
-		kairos_log("gyro: patch failed\n");
-	return len;
-}
-#endif
-
-void kairos_hook_reboot(int magic1, int magic2)
-{
-	if (!kairos_active())
-		return;
-	/* 原版 reboot_handler_pre 主要做关停清理，避免关机时 hook 残留 */
+	/* 真正的重启流程：关机前把驱动状态清干净，避免 hook 残留到下次启动 */
 	if (magic1 == LINUX_REBOOT_MAGIC1 && magic2 == LINUX_REBOOT_MAGIC2) {
 		down_write(&kairos_lifecycle_sem);
 		kairos_shutdown_locked();
 		up_write(&kairos_lifecycle_sem);
 	}
+	return false;
 }
 
 /* ================================================================== */
@@ -183,7 +182,7 @@ static int __init kairos_init(void)
 	init_rwsem(&kairos_lifecycle_sem);
 
 	/* 注意：这里**不打任何 log**。.ko 版的 "[KAIROS] K:0" 是 dmesg 里
-	 * 最直接的暴露，built-in 后连初始化的痕迹都不该留。 */
+	 * 最直接的暴露，built-in 后连初始化痕迹都不该留。 */
 	WRITE_ONCE(kairos_initialized, 1);
 	return 0;
 }
