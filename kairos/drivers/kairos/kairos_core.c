@@ -114,16 +114,17 @@ static long kairos_install_fd(void __user *out)
 }
 
 /* ================================================================== */
-/* 关停（供 OP_EXIT 与 reboot hook 调用）                              */
-/* 只解绑，不释放 ctx —— ctx 归 file 所有，release 时才 free。          */
+/* 只解绑 ctx / mm 引用，**不动 kairos_initialized**                    */
+/*                                                                     */
+/* 为什么单独拆出来：Android 开机过程中会有进程调用                     */
+/* reboot(标准 magic, 非法 cmd)，syscall 走到最后返回 EINVAL、机器并不  */
+/* 会真的重启。原逻辑在这种"失败的 reboot"上就把驱动关掉了，导致本次   */
+/* 开机内后续所有握手都失败（实测：TWRP 里正常，正常系统里握手 EINVAL）。*/
+/* 真重启时内核会整个重来，清理本来就没意义。                          */
 /* ================================================================== */
-void kairos_shutdown_locked(void)
+void kairos_release_ctx(void)
 {
 	struct kairos_ctx *ctx;
-
-	if (!READ_ONCE(kairos_initialized))
-		return;
-	WRITE_ONCE(kairos_initialized, 0);
 
 	ctx = xchg(&g_ctx, (struct kairos_ctx *)NULL);
 	if (ctx) {
@@ -135,6 +136,15 @@ void kairos_shutdown_locked(void)
 			ctx->mm_pid = 0;
 		}
 	}
+}
+
+/* 彻底关停（只有 OP_EXIT 用）：解绑 + 置 initialized=0 */
+void kairos_shutdown_locked(void)
+{
+	if (!READ_ONCE(kairos_initialized))
+		return;
+	WRITE_ONCE(kairos_initialized, 0);
+	kairos_release_ctx();
 }
 
 /* ================================================================== */
@@ -165,10 +175,11 @@ bool kairos_hook_reboot(int magic1, int magic2, unsigned int cmd,
 		return true;
 	}
 
-	/* 真正的重启流程：关机前把驱动状态清干净，避免 hook 残留到下次启动 */
+	/* 真正的重启流程：只解绑 fd/mm，**不要**把 initialized 清零 ——
+	 * 否则任何一次失败的 reboot() 调用都会让驱动在本次开机内失效。 */
 	if (magic1 == LINUX_REBOOT_MAGIC1 && magic2 == LINUX_REBOOT_MAGIC2) {
 		down_write(&kairos_lifecycle_sem);
-		kairos_shutdown_locked();
+		kairos_release_ctx();
 		up_write(&kairos_lifecycle_sem);
 	}
 	return false;
