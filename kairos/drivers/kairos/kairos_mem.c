@@ -155,8 +155,9 @@ static bool kairos_pte_still_same(struct kairos_va_result *v)
 /* ================================================================== */
 /* 3. swap 读取                                                        */
 /*                                                                     */
-/* built-in 后 swap_info[] / lookup_swap_cache 都是内核内部符号，       */
-/* 不需要 kallsyms 自举，直接调用即可。                                 */
+/* 原 .ko 版靠 kallsyms 自举拿 swap_info[] 和 lookup_swap_cache 的地址。 */
+/* built-in 后可以直接调用，但要注意：swap_info[] 是 static，永远引用不 */
+/* 到 —— 必须走 get_swap_device()（EXPORT_SYMBOL_GPL）。                */
 /* ================================================================== */
 static bool kairos_read_swap_page(swp_entry_t entry, void *dst,
 				  unsigned int off, size_t n)
