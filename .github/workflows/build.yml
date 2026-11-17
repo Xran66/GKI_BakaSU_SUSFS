@@ -1240,7 +1240,7 @@ jobs:
           sed -i 's/check_defconfig//' ./common/build.config.gki
 
       # ==================== Kairos 驱动（测试构建 .ko） ====================
-      - name: 集成 Kairos 驱动
+      - name: 集成 Kairos 驱动（built-in）
         working-directory: ${{ env.KERNEL_ROOT }}
         run: |
           set -e
@@ -1249,18 +1249,23 @@ jobs:
           p = 'common/drivers/Kconfig'
           s = open(p).read()
           if 'drivers/kairos/Kconfig' not in s:
-              i = s.rstrip().rfind('endmenu')
-              s = s[:i] + 'source "drivers/kairos/Kconfig"\n\n' + s[i:]
+              anchor = 'menu "Device Drivers"'
+              i = s.index(anchor) + len(anchor)
+              while s[i] == '\n':
+                  i += 1
+              s = s[:i] + '\nsource "drivers/kairos/Kconfig"\n' + s[i:]
               open(p, 'w').write(s)
           KYPY
           grep -q 'kairos/' ./common/drivers/Makefile || \
             printf '\nobj-$(CONFIG_KAIROS)\t\t+= kairos/\n' >> ./common/drivers/Makefile
+          # 源码级 hook：替换原版的两处 register_kprobe
+          python3 "$GITHUB_WORKSPACE/kairos/patches/inject_hooks.py" ./common
           cat >> "$DEFCONFIG" <<'KYCFG'
-          CONFIG_KAIROS=m
-          # CONFIG_KAIROS_GYRO_HOOK is not set
+          CONFIG_KAIROS=y
+          CONFIG_KAIROS_GYRO_HOOK=y
           # CONFIG_KAIROS_DEBUG is not set
           KYCFG
-          echo "Kairos: 已挂载到 drivers/kairos，CONFIG_KAIROS=m"
+          echo "Kairos: 已挂载到 drivers/kairos，CONFIG_KAIROS=y"
 
       # Lineage_Hide procfs 路径清洗：用户要求不加入，已移除。
 
