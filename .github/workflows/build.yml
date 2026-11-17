@@ -1239,6 +1239,29 @@ jobs:
 
           sed -i 's/check_defconfig//' ./common/build.config.gki
 
+      # ==================== Kairos 驱动（测试构建 .ko） ====================
+      - name: 集成 Kairos 驱动
+        working-directory: ${{ env.KERNEL_ROOT }}
+        run: |
+          set -e
+          cp -a "$GITHUB_WORKSPACE/kairos/drivers/kairos" ./common/drivers/kairos
+          python3 - <<'KYPY'
+          p = 'common/drivers/Kconfig'
+          s = open(p).read()
+          if 'drivers/kairos/Kconfig' not in s:
+              i = s.rstrip().rfind('endmenu')
+              s = s[:i] + 'source "drivers/kairos/Kconfig"\n\n' + s[i:]
+              open(p, 'w').write(s)
+          KYPY
+          grep -q 'kairos/' ./common/drivers/Makefile || \
+            printf '\nobj-$(CONFIG_KAIROS)\t\t+= kairos/\n' >> ./common/drivers/Makefile
+          cat >> "$DEFCONFIG" <<'KYCFG'
+          CONFIG_KAIROS=m
+          # CONFIG_KAIROS_GYRO_HOOK is not set
+          # CONFIG_KAIROS_DEBUG is not set
+          KYCFG
+          echo "Kairos: 已挂载到 drivers/kairos，CONFIG_KAIROS=m"
+
       # Lineage_Hide procfs 路径清洗：用户要求不加入，已移除。
 
       # ==================== 添加 SUSFS 配置 ====================
@@ -1646,6 +1669,22 @@ jobs:
       # ==================== 上传构建产物 ====================
       # AnyKernel3 包本身已是 zip，upload-artifact 会再套一层 zip 容器
       # compression-level=0 关闭外层压缩，避免对已压缩的 AK3 二次压缩
+      # ==================== Kairos 产物 ====================
+      - name: 收集 Kairos 模块
+        if: always()
+        run: |
+          echo "=== 查找 kairos.ko ==="
+          find "$KERNEL_ROOT/out" -name 'kairos.ko' 2>/dev/null | tee /tmp/ko.txt || true
+          KO=$(head -1 /tmp/ko.txt)
+          if [ -n "$KO" ]; then cp "$KO" "$GITHUB_WORKSPACE/kairos.ko"; ls -l "$GITHUB_WORKSPACE/kairos.ko"; fi
+      - name: 上传 Kairos 模块
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kairos-ko
+          path: kairos.ko
+          if-no-files-found: warn
+
       - name: 上传构建产物
         uses: actions/upload-artifact@v6
         with:
