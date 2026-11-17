@@ -154,8 +154,25 @@ long kairos_dispatch(struct file *file, u32 magic, u32 op, void __user *uarg)
 	case KOP_0x920:
 	case KOP_0x921:
 	case KOP_0x922:
+		return -EOPNOTSUPP;
+
+#ifdef CONFIG_KAIROS_GYRO_HOOK
+	case KOP_0x8B0: {		/* 陀螺仪参数配置 */
+		struct kairos_gyro_cfg cfg;
+
+		if (copy_from_user(&cfg, uarg, sizeof(cfg)))
+			return -EFAULT;
+		if (cfg.scale_x < 0 || cfg.scale_x > 1000 ||
+		    cfg.scale_y < 0 || cfg.scale_y > 1000)
+			return -EINVAL;
+		kairos_gyro_set(cfg.enable, cfg.mode,
+				cfg.scale_x, cfg.scale_y, cfg.type_mask);
+		return 0;
+	}
+#else
 	case KOP_0x8B0:
 		return -EOPNOTSUPP;
+#endif
 
 	case KOP_GET_TPIDR:
 	case KOP_GET_TPIDR2:
