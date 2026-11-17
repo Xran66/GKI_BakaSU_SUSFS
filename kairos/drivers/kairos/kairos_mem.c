@@ -367,17 +367,18 @@ static unsigned long kairos_write_gup(struct mm_struct *mm, unsigned long va,
 		unsigned long page_off = (va + done) & ~PAGE_MASK;
 		size_t n = min_t(size_t, PAGE_SIZE - page_off, len - done);
 		struct page *page = NULL;
-		int locked = 0;
 		long got;
 
 		if (mmap_read_lock_killable(mm))
 			break;
 
+		/* locked 参数传 NULL：mmap 锁由我们自己管，不让 GUP 参与
+		 * “是否已持锁”的状态机。之前传 &locked 且初值为 0，
+		 * GUP 会以为没持锁、遇到缺页时不去释放，直接死锁。 */
 		got = pin_user_pages_remote(mm, va + done, 1,
 					    FOLL_WRITE | FOLL_FORCE,
-					    &page, &locked);
-		if (locked)
-			mmap_read_unlock(mm);
+					    &page, NULL);
+		mmap_read_unlock(mm);
 
 		if (got != 1 || !page)
 			break;
