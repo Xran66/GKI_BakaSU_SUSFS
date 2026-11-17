@@ -27,6 +27,19 @@
 
 #include "kairos.h"
 
+/*
+ * swap_cache_get_folio() 在 6.6 里是 mm/swap_state.c 的全局函数，
+ * 但**没有任何头文件给它原型**（只在 mm/internal.h 之外隐式可见）。
+ * 驱动里 include 不到 mm/internal.h，所以自己按 6.6.127 的定义补一个：
+ *     struct folio *swap_cache_get_folio(swp_entry_t entry,
+ *                                        struct vm_area_struct *vma,
+ *                                        unsigned long addr);
+ * 换内核版本若签名变了，这里会立刻链接失败 —— 比悄悄错位好。
+ */
+struct folio *swap_cache_get_folio(swp_entry_t entry,
+				   struct vm_area_struct *vma,
+				   unsigned long addr);
+
 /* ================================================================== */
 /* 1. 取 mm                                                            */
 /* ================================================================== */
@@ -97,7 +110,7 @@ static bool kairos_va_to_pa(struct mm_struct *mm, unsigned long va,
 	if (pmd_leaf(READ_ONCE(*pmd))) {
 		phys_addr_t pa;
 
-		if (for_write && pmd_write(*pmd) == 0)
+		if (for_write && !pmd_write(READ_ONCE(*pmd)))
 			return false;
 		pa = __pfn_to_phys(pmd_pfn(READ_ONCE(*pmd))) | (va & ~PMD_MASK);
 		out->pa = pa;
@@ -166,25 +179,37 @@ static bool kairos_read_swap_page(swp_entry_t entry, void *dst,
 		}
 	}
 
-	/* 慢路径：自己发 bio 读块设备（原版的 swap 直读） */
+	/*
+	 * 慢路径：自己发 bio 读块设备（原版的 swap 直读）。
+	 *
+	 * 注意 swap_info[] 在 mm/swapfile.c 里是 static，任何外部代码都引用不到；
+	 * 官方访问器是 get_swap_device()（EXPORT_SYMBOL_GPL），它顺带把 swap
+	 * 设备的引用 pin 住，防止读到一半被 swapoff 掉 —— 原版没做这层保护，
+	 * 在 swapoff 并发时是会踩空指针的。
+	 */
 	{
 		struct swap_info_struct *si;
 		struct bio *bio;
 		int ret;
 
-		if (swp_type(entry) >= MAX_SWAPFILES)
+		si = get_swap_device(entry);
+		if (!si || swp_type(entry) >= MAX_SWAPFILES)
 			return false;
-		si = swap_info[swp_type(entry)];
-		if (!si || !(si->flags & SWP_USED) || !si->bdev)
+		if (!si->bdev) {
+			put_swap_device(si);
 			return false;
+		}
 
 		page = alloc_page(GFP_NOIO);
-		if (!page)
+		if (!page) {
+			put_swap_device(si);
 			return false;
+		}
 
 		bio = bio_alloc(si->bdev, 1, REQ_OP_READ, GFP_NOIO);
 		if (!bio) {
 			__free_page(page);
+			put_swap_device(si);
 			return false;
 		}
 		bio->bi_iter.bi_sector = (sector_t)swp_offset(entry) * (PAGE_SIZE >> 9);
@@ -192,6 +217,7 @@ static bool kairos_read_swap_page(swp_entry_t entry, void *dst,
 
 		ret = submit_bio_wait(bio);
 		bio_put(bio);
+		put_swap_device(si);
 		if (ret) {
 			__free_page(page);
 			return false;
@@ -334,9 +360,13 @@ static unsigned long kairos_write_gup(struct mm_struct *mm, unsigned long va,
 		if (got != 1 || !page)
 			break;
 
-		memcpy((char *)kmap_local_page(page) + page_off,
-		       (const char *)kbuf + done, n);
-		kunmap_local(kmap_local_page(page));
+		{
+			void *kaddr = kmap_local_page(page);
+
+			memcpy((char *)kaddr + page_off,
+			       (const char *)kbuf + done, n);
+			kunmap_local(kaddr);
+		}
 		set_page_dirty_lock(page);
 		unpin_user_page(page);
 		done += n;
