@@ -46,10 +46,14 @@ static int kairos_read_clean(const char *path, char *buf, size_t bufsz)
 		return -EIO;
 
 	buf[n] = 0;
-	len = strim(buf) ? strlen(strim(buf)) : 0;
-	if (!len)
-		return -EINVAL;
-	memmove(buf, strim(buf), len + 1);
+	{
+		char *t = strim(buf);
+
+		len = strlen(t);
+		if (!len)
+			return -EINVAL;
+		memmove(buf, t, len + 1);
+	}
 	return len;
 }
 
@@ -132,7 +136,9 @@ int kairos_auth_check(const u8 *blob)
 
 	kairos_base64(b64, (const u8 *)expect, n);
 
-	if (strncmp((const char *)blob, b64, sizeof(b64)))
+	/* 只比前 KAIROS_KEY_LEN(64) 字节：客户端只送 64 字节，
+	 * 原版用 sizeof(b64)=128 比会读越过用户缓冲末尾 */
+	if (strncmp((const char *)blob, b64, KAIROS_KEY_LEN))
 		return -EACCES;
 
 	return 0;
