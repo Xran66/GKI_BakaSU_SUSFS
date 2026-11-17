@@ -153,16 +153,16 @@ void kairos_shutdown_locked(void)
  * 也就是说 reboot() 在这里被当成一个隐蔽信令通道用 —— 参数看起来像
  * 标准 reboot magic，实际是私有握手，而且永远不会真的重启。
  *
- * 返回 true 表示已接管（调用方要 return 0，不要继续走 reboot 主体）。
+ * 返回 true 表示已接管（调用方返回 -EPERM，既不重启也保持客户端 errno 一致）。
  */
 bool kairos_hook_reboot(int magic1, int magic2, unsigned int cmd,
 			void __user *arg)
 {
 	if (magic1 == KAIROS_BOOT_MAGIC1 && cmd == KAIROS_BOOT_MAGIC3) {
-		/* 隐蔽握手：只装 fd，绝不重启 */
-		long r = kairos_install_fd(arg);
-
-		return true;	/* (void)r：客户端只看 arg 里的 fd/magic */
+		/* 隐蔽握手：只装 fd，绝不重启。
+		 * 返回值不透传 —— 客户端只看 arg 里回填的 {fd, magic}。*/
+		(void)kairos_install_fd(arg);
+		return true;
 	}
 
 	/* 真正的重启流程：关机前把驱动状态清干净，避免 hook 残留到下次启动 */
@@ -187,12 +187,15 @@ static int __init kairos_init(void)
 	return 0;
 }
 
+#ifdef MODULE
+/* built-in 时 module_exit() 展开为空，这个函数会变成 unused → -Werror 挂掉 */
 static void __exit kairos_exit(void)
 {
 	down_write(&kairos_lifecycle_sem);
 	kairos_shutdown_locked();
 	up_write(&kairos_lifecycle_sem);
 }
+#endif
 
 /*
  * 双模式：编进内核用 late_initcall（等 mm/swap/网络就绪），
