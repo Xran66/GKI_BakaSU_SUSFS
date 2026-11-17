@@ -141,15 +141,31 @@ static bool kairos_va_to_pa(struct mm_struct *mm, unsigned long va,
 	return true;
 }
 
-/* 拷完复核：页表项还在、还指向同一物理页 */
+/*
+ * 拷完复核：页表项还在、还指向同一物理页。
+ *
+ * 这里原来有两个 bug（实测才发现，读取永远返回 0 字节）：
+ *   1. 掩码算错：((pte >> 12) & GENMASK_ULL(47,0)) 实际取的是原 PTE 的
+ *      bit12..59，把 AF/SH/AP 这些属性位也当成了 PFN，比较必然不等。
+ *      正确做法是用 pte_pfn()/pmd_pfn()，它们只取输出地址位。
+ *   2. 块映射判断写成了 (val & 3) == 3，那是 PMD_TYPE_TABLE；
+ *      arm64 的块映射是 PMD_TYPE_SECT == 1。
+ * 直接改用内核的 pmd_sect()/pmd_pfn()/pte_present()/pte_pfn() 最稳。
+ */
 static bool kairos_pte_still_same(struct kairos_va_result *v)
 {
-	u64 now = READ_ONCE(*v->pte_slot);
+	if (v->block) {
+		pmd_t now = READ_ONCE(*(pmd_t *)v->pte_slot);
 
-	if (v->block)
-		return (now & 3) == 3 && ((now ^ v->pa) & ~PMD_MASK) == 0;
-	return (now & 1) &&
-	       (((now >> PAGE_SHIFT) & GENMASK_ULL(47, 0)) == (v->pa >> PAGE_SHIFT));
+		return pmd_sect(now) &&
+		       pmd_pfn(now) == (unsigned long)(v->pa >> PAGE_SHIFT);
+	}
+	{
+		pte_t now = READ_ONCE(*(pte_t *)v->pte_slot);
+
+		return pte_present(now) &&
+		       pte_pfn(now) == (unsigned long)(v->pa >> PAGE_SHIFT);
+	}
 }
 
 /* ================================================================== */
