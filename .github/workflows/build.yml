@@ -1261,11 +1261,11 @@ jobs:
           # 源码级 hook：替换原版的两处 register_kprobe
           python3 "$GITHUB_WORKSPACE/kairos/patches/inject_hooks.py" ./common
           cat >> "$DEFCONFIG" <<'KYCFG'
-          CONFIG_KAIROS=y
-          CONFIG_KAIROS_GYRO_HOOK=y
+          # CONFIG_KAIROS is not set
+          # CONFIG_KAIROS_GYRO_HOOK is not set
           # CONFIG_KAIROS_DEBUG is not set
           KYCFG
-          echo "Kairos: 已挂载到 drivers/kairos，CONFIG_KAIROS=y"
+          echo "Kairos: 已挂载到 drivers/kairos，# CONFIG_KAIROS is not set"
 
       # Lineage_Hide procfs 路径清洗：用户要求不加入，已移除。
 
