@@ -609,10 +609,41 @@ static int kairos_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
+/* ================================================================== */
+/* fd 上的 read / write 探针                                            */
+/*                                                                     */
+/* 原版 fops 是否实现这两个入口未知，但客户端有可能用 write() 下发      */
+/* 触摸命令（而不是 ioctl）。这里先挂一对只记录、不实现的存根：         */
+/* 一旦客户端真的在写，dmesg 里会看到 "kairos: write len=..." ，        */
+/* 从而确认通道；否则说明它压根没走这条 fd。                            */
+/* ================================================================== */
+static ssize_t kairos_fd_write(struct file *f, const char __user *buf,
+			       size_t len, loff_t *ppos)
+{
+	u8 head[32];
+	size_t n = min_t(size_t, len, sizeof(head));
+
+	memset(head, 0, sizeof(head));
+	if (copy_from_user(head, buf, n))
+		return -EFAULT;
+
+	pr_info("kairos: write len=%zu head=%*phN\n", len, (int)n, head);
+	return -EINVAL;			/* 保持"不支持写入"的语义 */
+}
+
+static ssize_t kairos_fd_read(struct file *f, char __user *buf,
+			      size_t len, loff_t *ppos)
+{
+	pr_info("kairos: read len=%zu\n", len);
+	return -EINVAL;
+}
+
 const struct file_operations kairos_fops = {
 #ifdef MODULE
 	.owner		= THIS_MODULE,	/* built-in 时 THIS_MODULE 为 NULL，没必要写 */
 #endif
 	.unlocked_ioctl	= kairos_ioctl,
+	.read		= kairos_fd_read,
+	.write		= kairos_fd_write,
 	.release	= kairos_release,
 };
