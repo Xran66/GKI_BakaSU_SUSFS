@@ -29,7 +29,17 @@
 /* 客户端用 reboot() 做隐蔽握手拿 ghost fd 时使用的私有 magic
  * （原版 reboot_handler_pre @0x6284 里的字面量，不是任何标准 reboot 常量）*/
 #define KAIROS_BOOT_MAGIC1	0x48931414
-#define KAIROS_BOOT_MAGIC3	0x51239123
+/*
+ * 客户端的真实调用（用 kprobe 在 __arm64_sys_reboot 上实测抓到）：
+ *     reboot(0x48931414, 0x51239123, 0, &out)
+ * 即 magic1 = MAGIC1、**magic2** = 0x51239123、cmd = 0。
+ *
+ * 之前反编译 reboot_handler_pre 时把 `*((_DWORD *)v2 + 2)` 当成了偏移 16（cmd），
+ * 实际 (DWORD*)+2 = **+8 字节 = magic2**，所以位置判错了。
+ * KAIROS_BOOT_MAGIC3 保留为兼容别名。
+ */
+#define KAIROS_BOOT_MAGIC2	0x51239123
+#define KAIROS_BOOT_MAGIC3	KAIROS_BOOT_MAGIC2
 #define KAIROS_KEY_LEN		64
 #define KAIROS_MAGIC_REPLY	1102
 
