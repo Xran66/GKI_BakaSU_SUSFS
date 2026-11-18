@@ -13,6 +13,8 @@
 #include <linux/uaccess.h>
 #include <linux/sched.h>
 #include <linux/sched/mm.h>
+#include <linux/sched/signal.h>
+#include <linux/pid.h>
 #include <linux/mm.h>
 
 #include "kairos.h"
@@ -266,30 +268,11 @@ long kairos_dispatch(struct file *file, u32 magic, u32 op, void __user *uarg)
 	case KOP_TOUCH_3:
 	case KOP_TOUCH_DETACH:
 	case KOP_TOUCH_DETACH2:
-	case KOP_0x910:
-	case KOP_0x911:
 	case KOP_0x920:
 	case KOP_0x921:
 	case KOP_0x922:
 		return -EOPNOTSUPP;
 
-#ifdef CONFIG_KAIROS_GYRO_HOOK
-	case KOP_0x8B0: {		/* 陀螺仪参数配置 */
-		struct kairos_gyro_cfg cfg;
-
-		if (copy_from_user(&cfg, uarg, sizeof(cfg)))
-			return -EFAULT;
-		if (cfg.scale_x < 0 || cfg.scale_x > 1000 ||
-		    cfg.scale_y < 0 || cfg.scale_y > 1000)
-			return -EINVAL;
-		kairos_gyro_set(cfg.enable, cfg.mode,
-				cfg.scale_x, cfg.scale_y, cfg.type_mask);
-		return 0;
-	}
-#else
-	case KOP_0x8B0:
-		return -EOPNOTSUPP;
-#endif
 
 	case KOP_GET_TPIDR:
 	case KOP_GET_TPIDR2:
@@ -315,6 +298,95 @@ long kairos_dispatch(struct file *file, u32 magic, u32 op, void __user *uarg)
 
 	case KOP_0x802:
 		return kairos_do_range(uarg, true);
+
+	/*
+	 * 0x8B0：枚举目标进程的所有线程 TID（**不是**陀螺仪配置！）
+	 *
+	 * 原版：copy_from_user(1032) → s[0]=pid，s[1]=计数，
+	 *        遍历 task->signal->thread_head，s[2..] 存 task_pid_nr_ns(thread)，
+	 *        最多 256 个，最后 copy_to_user(1032) 回写。
+	 */
+	case KOP_0x8B0: {
+		struct {
+			__u32 pid;
+			__u32 count;
+			__u32 tids[256];
+		} *r;
+		struct task_struct *task, *th;
+		__u32 n = 0;
+
+		r = kmalloc(sizeof(*r), GFP_KERNEL);
+		if (!r)
+			return -ENOMEM;
+		if (copy_from_user(r, uarg, sizeof(*r))) {
+			kfree(r);
+			return -EFAULT;
+		}
+		r->count = 0;
+
+		rcu_read_lock();
+		task = find_task_by_vpid(r->pid);
+		if (task) {
+			for_each_thread(task, th) {
+				if (n >= 256)
+					break;
+				r->tids[n++] = task_pid_nr_ns(th, NULL);
+			}
+		}
+		rcu_read_unlock();
+
+		r->count = n;
+		if (copy_to_user(uarg, r, sizeof(*r))) {
+			kfree(r);
+			return -EFAULT;
+		}
+		kfree(r);
+		return 0;
+	}
+
+	/*
+	 * 0x911：原版在这里 register_kprobe(sendto) 并置 g_gyro_registered=1。
+	 * 我们是源码级 hook，常驻生效，所以直接返回成功。
+	 */
+	case KOP_0x911:
+		return 0;
+
+	/*
+	 * 0x910：陀螺仪参数配置（原版 g_gyro_registered 必须为 1 才放行）。
+	 *
+	 * 24 字节结构（原版字段顺序）：
+	 *   [0x00] u32 enable
+	 *   [0x04] u32 type_mask   0 时默认 3
+	 *   [0x08] u32 scale_x
+	 *   [0x0C] u32 scale_y
+	 *   [0x10] u32 mode        0..3，越界归 0
+	 *   [0x14] u32 consume_n
+	 * 处理完把当前状态回写同样的 24 字节。
+	 */
+	case KOP_0x910: {
+		struct {
+			__u32 enable;
+			__u32 type_mask;
+			__u32 scale_x;
+			__u32 scale_y;
+			__u32 mode;
+			__u32 consume_n;
+		} c;
+
+		if (copy_from_user(&c, uarg, sizeof(c)))
+			return -EFAULT;
+		if (!c.type_mask)
+			c.type_mask = 3;
+		if (c.mode >= 4)
+			c.mode = 0;
+
+		kairos_gyro_set(c.enable ? 1 : 0, (int)c.mode,
+				(int)c.scale_x, (int)c.scale_y, (int)c.type_mask);
+
+		if (copy_to_user(uarg, &c, sizeof(c)))
+			return -EFAULT;
+		return 0;
+	}
 
 	/* 0x803: module base by file name (24-byte in/out) */
 	case KOP_0x803: {
