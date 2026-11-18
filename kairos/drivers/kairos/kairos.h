@@ -28,6 +28,19 @@
 #define KAIROS_MAX_REQ		0xFF
 /* 客户端用 reboot() 做隐蔽握手拿 ghost fd 时使用的私有 magic
  * （原版 reboot_handler_pre @0x6284 里的字面量，不是任何标准 reboot 常量）*/
+/*
+ * 写入开关。
+ *
+ * 实际用途里只读不写（自瞄/透视都是读游戏内存），写入路径没有使用场景，
+ * 关闭它可以：
+ *   · 避免误写游戏内存（写穿 COW 会污染 fork 共享页 / page cache）
+ *   · 少一条可被检测的攻击面
+ * 代码全部保留在 kairos_mem.c 里，需要时把这个宏改成 1 即可恢复。
+ */
+#ifndef KAIROS_WRITE_ENABLE
+#define KAIROS_WRITE_ENABLE	0
+#endif
+
 #define KAIROS_BOOT_MAGIC1	0x48931414
 /*
  * 客户端的真实调用（用 kprobe 在 __arm64_sys_reboot 上实测抓到）：
