@@ -63,14 +63,28 @@ static long kairos_install_fd(void __user *out)
 	u32 reply[2];
 
 	mutex_lock(&kairos_install_mutex);
-	old = READ_ONCE(g_ctx);
-	if (old) {			/* 幂等：已有实例就把 fd/magic 再给它一次 */
-		reply[0] = (u32)old->fd;
-		reply[1] = old->magic;
-		mutex_unlock(&kairos_install_mutex);
-		if (copy_to_user(out, reply, sizeof(reply)))
-			return -EFAULT;
-		return 0;
+
+	/*
+	 * 每次握手都装一个**新 fd**，绝不复用旧实例。
+	 *
+	 * 原来这里有一段"已有实例就把 fd/magic 再给它一次"的幂等逻辑，
+	 * 在真机上会坏：客户端被 kill 时如果还残留子进程持有那个 anon fd，
+	 * g_ctx 就一直绑在**上一个进程**的会话上，于是下一次握手把一个
+	 * 属于别的进程的 fd 号返回给新进程 —— 新进程拿它 ioctl 必然失败，
+	 * 表现就是"必须重启才能再用一次"。
+	 *
+	 * 旧 ctx 只解绑不释放：它归它自己的 file->private_data 管，
+	 * 等那个 file 被关掉时由 kairos_release() 负责 kfree。
+	 */
+	old = xchg(&g_ctx, (struct kairos_ctx *)NULL);
+	if (old) {
+		old->authed = 0;
+		old->magic = 0;
+		if (old->mm) {
+			mmput(old->mm);
+			old->mm = NULL;
+			old->mm_pid = 0;
+		}
 	}
 
 	fd = get_unused_fd_flags(O_CLOEXEC);
