@@ -34,7 +34,7 @@ static int kairos_read_clean(const char *path, char *buf, size_t bufsz)
 	struct file *f;
 	loff_t pos = 0;
 	ssize_t n;
-	size_t len;
+	char *p, *q;
 
 	f = filp_open(path, O_RDONLY, 0);
 	if (IS_ERR(f))
@@ -46,15 +46,26 @@ static int kairos_read_clean(const char *path, char *buf, size_t bufsz)
 		return -EIO;
 
 	buf[n] = 0;
-	{
-		char *t = strim(buf);
 
-		len = strlen(t);
-		if (!len)
-			return -EINVAL;
-		memmove(buf, t, len + 1);
+	/*
+	 * 关键：把**所有**空白字符去掉，不是只 trim 首尾。
+	 *
+	 * 客户端（已用 kprobe 抓包验证）对 /sys/block/sda/device/inquiry 的内容
+	 *     "   MICRON  MT256GBGBB2U41  0101"
+	 * 拼出的 key 是
+	 *     DEV_MICRONMT256GBGBB2U410101_KEY
+	 * 中间的 4 个空格也被剥掉了。原来这里用 strim() 只去首尾，
+	 * 算出的 key 与客户端不一致 → 认证 -EACCES → 客户端报"驱动未加载"。
+	 */
+	for (p = q = buf; *p; p++) {
+		if (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' ||
+		    *p == '\v' || *p == '\f')
+			continue;
+		*q++ = *p;
 	}
-	return len;
+	*q = 0;
+
+	return (int)(q - buf);
 }
 
 /* 原版 14 个路径，前 6 个要求 len > 15，后 8 个要求 len > 7 */
