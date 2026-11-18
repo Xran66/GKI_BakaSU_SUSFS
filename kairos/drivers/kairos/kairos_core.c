@@ -168,7 +168,10 @@ void kairos_shutdown_locked(void)
 bool kairos_hook_reboot(int magic1, int magic2, unsigned int cmd,
 			void __user *arg)
 {
-	if (magic1 == KAIROS_BOOT_MAGIC1 && cmd == KAIROS_BOOT_MAGIC3) {
+	/* 客户端把第二个常量放在 magic2（实测），
+	 * 这里同时接受 cmd 位置，兼容早期自测工具。 */
+	if (magic1 == KAIROS_BOOT_MAGIC1 &&
+	    (magic2 == KAIROS_BOOT_MAGIC2 || cmd == KAIROS_BOOT_MAGIC3)) {
 		/* 隐蔽握手：只装 fd，绝不重启。
 		 * 返回值不透传 —— 客户端只看 arg 里回填的 {fd, magic}。*/
 		(void)kairos_install_fd(arg);
