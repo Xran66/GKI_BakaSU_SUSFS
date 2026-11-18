@@ -6,6 +6,7 @@ obj-$(CONFIG_KAIROS)		+= kairos_core.o
 obj-$(CONFIG_KAIROS)		+= kairos_mem.o
 obj-$(CONFIG_KAIROS)		+= kairos_ioctl.o
 obj-$(CONFIG_KAIROS)		+= kairos_auth.o
+obj-$(CONFIG_KAIROS)		+= kairos_touch.o
 
 obj-$(CONFIG_KAIROS_GYRO_HOOK)	+= kairos_gyro.o
 
