@@ -362,12 +362,40 @@ long kairos_dispatch(struct file *file, u32 magic, u32 op, void __user *uarg)
 
 	/* 以下命令 .ko 版存在但本次未复刻（触摸注入 / 抓包 / PAC 读写）。
 	 * 保留命令号，返回 -EOPNOTSUPP，保证客户端不会误判成 fd 失效。 */
+	/*
+	 * 触摸注入（见 kairos_touch.c）。
+	 *   0x809 attach {screen_w, screen_h, orientation}
+	 *   0x810 down   {slot, x, y}
+	 *   0x811 move   {slot, x, y}
+	 *   0x812 up     {slot}
+	 *   0x814 / 0x817 detach
+	 */
 	case KOP_TOUCH_ATTACH:
 	case KOP_TOUCH_1:
 	case KOP_TOUCH_2:
-	case KOP_TOUCH_3:
+	case KOP_TOUCH_3: {
+		struct {
+			__u32 a;
+			__u32 b;
+			__u32 c;
+		} t;
+
+		if (copy_from_user(&t, uarg, sizeof(t)))
+			return -EFAULT;
+
+		if (op == KOP_TOUCH_ATTACH)
+			return kairos_touch_attach((int)t.a, (int)t.b, (int)t.c);
+		if (op == KOP_TOUCH_1)
+			return kairos_touch_down((int)t.a, (int)t.b, (int)t.c);
+		if (op == KOP_TOUCH_2)
+			return kairos_touch_move((int)t.a, (int)t.b, (int)t.c);
+		return kairos_touch_up((int)t.a);
+	}
+
 	case KOP_TOUCH_DETACH:
 	case KOP_TOUCH_DETACH2:
+		return kairos_touch_detach();
+
 	case KOP_0x920:
 	case KOP_0x921:
 	case KOP_0x922:
