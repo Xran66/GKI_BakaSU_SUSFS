@@ -76,16 +76,17 @@ static long kairos_install_fd(void __user *out)
 	 * 旧 ctx 只解绑不释放：它归它自己的 file->private_data 管，
 	 * 等那个 file 被关掉时由 kairos_release() 负责 kfree。
 	 */
+	/*
+	 * 只把全局指针摘掉，**不动旧 ctx 的 magic / authed / mm**。
+	 *
+	 * 客户端有多个工作进程共用同一个 fd（父进程握手、子进程继承）。
+	 * 之前这里把旧 ctx 的 magic 清 0，等于让所有继承该 fd 的进程
+	 * 在 dispatch 开头就被判 ENOTTY(-25) —— 表现就是"驱动连着但读不到数据"。
+	 * 旧 ctx 的生命周期交给它自己的 file->private_data，等 file 关闭时
+	 * 由 kairos_release() 负责 kfree。
+	 */
 	old = xchg(&g_ctx, (struct kairos_ctx *)NULL);
-	if (old) {
-		old->authed = 0;
-		old->magic = 0;
-		if (old->mm) {
-			mmput(old->mm);
-			old->mm = NULL;
-			old->mm_pid = 0;
-		}
-	}
+	(void)old;
 
 	fd = get_unused_fd_flags(O_CLOEXEC);
 	if (fd < 0) {
