@@ -135,7 +135,100 @@ static long kairos_do_range(void __user *uarg, bool write)
 	return ret;
 }
 
-static long kairos_do_mem(struct kairos_ctx *ctx, void __user *uarg)
+/* ================================================================== */
+/* 0x8D0 / 0x8D2：批量读多个区间                                        */
+/*                                                                     */
+/* 原版请求体（decomp_all.md 的 xc29a9955...）：                        */
+/*   [0x0000] u32 pid                                                   */
+/*   [0x0004] u32 count        1..256，0 直接成功返回                    */
+/*   [0x0008] entry[count]     每项 16 字节 {u64 va; u32 len; u32 pad}   */
+/*   [0x1008] out[0x8000]      各段数据依次写入（8 + 256*16 = 0x1008）   */
+/* 累计长度超 0x8000 或某段读不全就停下，最终返回 0。                    */
+/*                                                                     */
+/* 之前按 {pid,pad,va,buf,len,mode} 解析，len 落在 entry 数组中间，      */
+/* 永远是非法值 → 每次调用都 -EINVAL，这就是"驱动通但读不到数据"。       */
+/* ================================================================== */
+struct kairos_batch_entry {
+	__u64	va;
+	__u32	len;
+	__u32	pad;
+};
+
+#define KAIROS_BATCH_OUT_OFF	0x1008
+#define KAIROS_BATCH_OUT_MAX	0x8000
+
+static long kairos_do_batch(void __user *uarg)
+{
+	struct {
+		__u32 pid;
+		__u32 count;
+	} h;
+	struct mm_struct *mm;
+	void *kbuf;
+	unsigned long acc = 0;
+	__u32 i;
+	long ret = 0;
+
+	if (copy_from_user(&h, uarg, sizeof(h)))
+		return -EFAULT;
+	if (!h.count)
+		return 0;
+	if (h.count > 256)
+		return -EINVAL;
+
+	mm = h.pid ? kairos_grab_mm_by_pid(h.pid) : get_task_mm(current);
+	if (!mm)
+		return -ESRCH;
+
+	kbuf = kvmalloc(SZ_64K, GFP_KERNEL);
+	if (!kbuf) {
+		mmput(mm);
+		return -ENOMEM;
+	}
+
+	for (i = 0; i < h.count; i++) {
+		struct kairos_batch_entry e;
+		unsigned long n, got;
+
+		if (copy_from_user(&e, (char __user *)uarg + 8 + (size_t)i * sizeof(e),
+				   sizeof(e))) {
+			ret = -EFAULT;
+			break;
+		}
+		n = e.len;
+		if (!n)
+			continue;
+		if (acc + n > KAIROS_BATCH_OUT_MAX)
+			break;
+		if (n > SZ_64K)
+			break;
+
+		if (e.va < 0x1000) {		/* 原版对低地址直接给零 */
+			if (clear_user((char __user *)uarg + KAIROS_BATCH_OUT_OFF + acc, n)) {
+				ret = -EFAULT;
+				break;
+			}
+			acc += n;
+			continue;
+		}
+
+		got = kairos_read_to_kbuf(mm, e.va, kbuf, n);
+		if (got != n)
+			break;
+		if (copy_to_user((char __user *)uarg + KAIROS_BATCH_OUT_OFF + acc,
+				 kbuf, n)) {
+			ret = -EFAULT;
+			break;
+		}
+		acc += n;
+	}
+
+	kvfree(kbuf);
+	mmput(mm);
+	return ret;
+}
+
+static long __maybe_unused kairos_do_mem(struct kairos_ctx *ctx, void __user *uarg)
 {
 	struct kairos_mem_req r;
 	struct mm_struct *mm;
@@ -243,7 +336,7 @@ long kairos_dispatch(struct file *file, u32 magic, u32 op, void __user *uarg)
 
 	case KOP_MEM_A:
 	case KOP_MEM_A2:
-		return kairos_do_mem(ctx, uarg);
+		return kairos_do_batch(uarg);
 
 	case KOP_EXIT:
 		/*
