@@ -256,6 +256,41 @@ static bool kairos_read_swap_page(swp_entry_t entry, void *dst,
 /* ================================================================== */
 /* 4. 读：VA -> kbuf                                                   */
 /* ================================================================== */
+/*
+ * 单页 GUP 读取兜底。
+ *
+ * 直接走页表读不到的情况有两类：
+ *   1) 页已换出 —— 走 swap 路径
+ *   2) 页**从未被访问过**（PTE 是 none，比如 ART 的 non-moving heap 里还没碰过的页）
+ * 第 2 类原版也是直接放弃；这里用 GUP 触发一次缺页把它读进来，
+ * 返回内容和 /proc/<pid>/mem 一致（零页），但不会让整次读取失败。
+ */
+static unsigned long kairos_read_gup_page(struct mm_struct *mm, unsigned long va,
+					  void *dst, size_t n)
+{
+	struct page *page = NULL;
+	unsigned long page_off = va & ~PAGE_MASK;
+	long got;
+
+	if (mmap_read_lock_killable(mm))
+		return 0;
+
+	got = pin_user_pages_remote(mm, va, 1, FOLL_FORCE, &page, NULL);
+	mmap_read_unlock(mm);
+
+	if (got != 1 || !page)
+		return 0;
+
+	{
+		void *kaddr = kmap_local_page(page);
+
+		memcpy(dst, (char *)kaddr + page_off, n);
+		kunmap_local(kaddr);
+	}
+	unpin_user_page(page);
+	return n;
+}
+
 unsigned long kairos_read_to_kbuf(struct mm_struct *mm, unsigned long va,
 				  void *kbuf, unsigned long len)
 {
@@ -304,8 +339,17 @@ unsigned long kairos_read_to_kbuf(struct mm_struct *mm, unsigned long va,
 			}
 		}
 		rcu_read_unlock();
-		if (!ok)
-			break;
+		if (!ok) {
+			/* 页表直读不可用（未缺页 / 特殊页）：GUP 兜底 */
+			unsigned long got;
+
+			got = kairos_read_gup_page(mm, va + done,
+						   (char *)kbuf + done, n);
+			if (!got)
+				break;
+			done += got;
+			continue;
+		}
 		done += n;
 	}
 out:
