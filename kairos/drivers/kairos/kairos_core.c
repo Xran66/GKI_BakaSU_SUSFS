@@ -141,16 +141,18 @@ void kairos_release_ctx(void)
 {
 	struct kairos_ctx *ctx;
 
+	/*
+	 * 只摘全局指针，**不清 magic / authed / mm**。
+	 *
+	 * OP_EXIT 会调到这里。客户端是多进程共用同一个 fd（父进程握手、
+	 * 工作进程继承），主进程关掉某个子窗口发一次 OP_EXIT，
+	 * 如果把 magic 清 0，所有继承该 fd 的工作进程立刻被判 -ENOTTY(-25)，
+	 * 表现就是"驱动连着但读取链路失败"。
+	 *
+	 * 会话状态交给它自己的 file：file 关闭时 kairos_release() 负责 kfree。
+	 */
 	ctx = xchg(&g_ctx, (struct kairos_ctx *)NULL);
-	if (ctx) {
-		ctx->authed = 0;
-		ctx->magic = 0;
-		if (ctx->mm) {
-			mmput(ctx->mm);
-			ctx->mm = NULL;
-			ctx->mm_pid = 0;
-		}
-	}
+	(void)ctx;
 }
 
 /* 彻底关停（只有 OP_EXIT 用）：解绑 + 置 initialized=0 */
