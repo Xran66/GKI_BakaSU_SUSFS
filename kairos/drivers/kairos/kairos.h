@@ -69,6 +69,13 @@ struct kairos_req {
  * （会在 /sys/module/kernel/parameters/ 下露出来），所以走这条 op。
  * scale_x/scale_y 是百分比：100 = 原值不改写。
  */
+/* kairos_touch.c */
+int kairos_touch_attach(int screen_w, int screen_h, int orientation);
+int kairos_touch_down(int slot, int x, int y);
+int kairos_touch_move(int slot, int x, int y);
+int kairos_touch_up(int slot);
+int kairos_touch_detach(void);
+
 struct kairos_gyro_cfg {
 	__s32	enable;
 	__s32	mode;		/* 0 正常 / 1 XY互换取反 / 2 双取反 / 3 只互换 */
