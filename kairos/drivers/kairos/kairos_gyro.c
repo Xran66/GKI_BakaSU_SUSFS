@@ -15,7 +15,7 @@
  * ── 两个必须注意的内核限制 ───────────────────────────────────
  *  1. arm64 内核用 -mgeneral-regs-only 编译，**禁止任何浮点/SIMD 运算**。
  *     所以这里的缩放不能用 float，只能用 IEEE754 整数位运算实现
- *     （kairos_f32_scale：拆符号/阶码/尾数 → 整数乘 → 重新规格化）。
+ *     （kairos_f32_add：拆符号/阶码/尾数 → 对齐 → 相加 → 重新规格化）。
  *  2. 不能用 module_param：built-in 时会在
  *     /sys/module/kernel/parameters/ 下露出 gyro_enable 等五个参数，
  *     属于白送的指纹。改用 ioctl 配置，编进内核时参数表为空。
@@ -39,8 +39,8 @@
 
 static int gyro_enable		= 1;
 static int gyro_mode;			/* 0: 正常 1: X/Y互换并取反 2: 双取反 3: 只互换 */
-static int gyro_scale_x		= 100;	/* 百分比 */
-static int gyro_scale_y		= 100;
+static u32 gyro_par_a;			/* float 位模式：X 偏移量（原版 dword_1EF9C） */
+static u32 gyro_par_b;			/* float 位模式：Y 偏移量（原版 dword_1EFA0） */
 static int gyro_type_mask	= 0x3;	/* bit0: type 4, bit1: type 16 */
 
 static unsigned int g_gyro_seq;
@@ -59,55 +59,78 @@ unsigned int kairos_gyro_stamp(void)
 /* 把尾数扩展成 24 位整数 sig，实际指数 e = exp-150（含尾数隐含位移），  */
 /* 乘上百分比后重新规格化回 [2^23, 2^24)，再拼回去。                     */
 /* 精度损失 < 1 ULP，对陀螺仪这种数据完全够用。                          */
-/* ================================================================== */
-static u32 kairos_f32_scale(u32 bits, int pct)
-{
-	u32 sign = bits & 0x80000000u;
-	u32 exp  = (bits >> 23) & 0xFFu;
-	u32 mant = bits & 0x7FFFFFu;
-	s64 sig;
-	int e;
-
-	if (pct == 100 || !pct)
-		return bits;
-	if (exp == 0xFFu)		/* inf / NaN：原样放行 */
-		return bits;
-	if (exp == 0) {
-		if (!mant)
-			return bits;	/* 正负零 */
-		sig = mant;		/* 次正规数 */
-		e = -149;
-	} else {
-		sig = mant | 0x800000u;
-		e = (int)exp - 150;
-	}
-
-	sig = div_s64(sig * (s64)pct, 100);
-	if (sig <= 0)
-		return sign;		/* 下溢成零，保留符号 */
-
-	/* 规格化到 24 位有效位 */
-	while (sig >= 0x1000000LL) {
-		sig >>= 1;
-		e++;
-	}
-	while (sig && sig < 0x800000LL) {
-		sig <<= 1;
-		e--;
-	}
-	if (!sig)
-		return sign;
-
-	e += 150;
-	if (e >= 255)
-		return sign | 0x7F800000u;	/* 溢出成 inf */
-	if (e <= 0)
-		return sign;			/* 下溢成 0（不细分次正规） */
-
-	return sign | ((u32)e << 23) | ((u32)sig & 0x7FFFFFu);
-}
 
 /* 位级取负：等价于把 float 的符号位翻转（比 mode 里 ^0x80000000 更准确） */
+/*
+ * IEEE754 单精度加法（纯整数实现，内核里不能用浮点）。
+ *
+ * 原版 0x910 的那两个参数是 **float 偏移量**，不是百分比缩放：
+ * 对每个采样做 sample + offset。之前按百分比乘法处理，
+ * 客户端送来的 1.0f(0x3F800000) 被当成十亿倍，画面直接乱掉、方向反了。
+ */
+static u32 kairos_f32_add(u32 a, u32 b)
+{
+	int ea = (a >> 23) & 0xff, eb = (b >> 23) & 0xff;
+	u32 ma = a & 0x7fffff, mb = b & 0x7fffff;
+	u32 sa = a >> 31, sb = b >> 31, s, m;
+	int e, d;
+
+	if (!(a & 0x7fffffff))
+		return b;
+	if (!(b & 0x7fffffff))
+		return a;
+	if (ea == 0xff || eb == 0xff)
+		return a;			/* NaN/Inf：原样 */
+
+	if (ea)
+		ma |= 0x800000;
+	else
+		ea = 1;
+	if (eb)
+		mb |= 0x800000;
+	else
+		eb = 1;
+
+	if (ea >= eb) {
+		e = ea;
+		d = ea - eb;
+		mb >>= (d > 31 ? 31 : d);
+	} else {
+		e = eb;
+		d = eb - ea;
+		ma >>= (d > 31 ? 31 : d);
+	}
+
+	if (sa == sb) {
+		s = sa;
+		m = ma + mb;
+		if (m & 0x1000000) {
+			m >>= 1;
+			e++;
+		}
+	} else {
+		if (ma >= mb) {
+			s = sa;
+			m = ma - mb;
+		} else {
+			s = sb;
+			m = mb - ma;
+		}
+		if (!m)
+			return 0;
+		while (!(m & 0x800000)) {
+			m <<= 1;
+			e--;
+		}
+	}
+
+	if (e <= 0)
+		return s << 31;
+	if (e >= 0xff)
+		return (s << 31) | 0x7f800000;
+	return (s << 31) | ((u32)e << 23) | (m & 0x7fffff);
+}
+
 static inline u32 kairos_f32_neg(u32 bits)
 {
 	return bits ^ 0x80000000u;
@@ -140,6 +163,7 @@ int kairos_gyro_patch(unsigned int seq, void __user *data, size_t len)
 {
 	u8 *kbuf;
 	size_t i, nrec;
+	u32 off_x, off_y;
 	int patched = 0;
 
 	if (!gyro_enable || !data)
@@ -155,11 +179,34 @@ int kairos_gyro_patch(unsigned int seq, void __user *data, size_t len)
 		return -EFAULT;
 	}
 
+	/* 原版语义：mode 变换的是**偏移参数**，不是采样值 */
+	off_x = gyro_par_a;
+	off_y = gyro_par_b;
+	switch (gyro_mode) {
+	case 3: {			/* 只互换 */
+		u32 t = off_x;
+		off_x = off_y;
+		off_y = t;
+		break;
+	}
+	case 2:				/* 双取反 */
+		off_x = kairos_f32_neg(off_x);
+		off_y = kairos_f32_neg(off_y);
+		break;
+	case 1: {			/* 互换并取反 */
+		u32 t = kairos_f32_neg(off_y);
+		off_y = kairos_f32_neg(off_x);
+		off_x = t;
+		break;
+	}
+	default:
+		break;
+	}
+
 	nrec = len / GYRO_REC_SIZE;
 	for (i = 0; i < nrec; i++) {
 		u8 *rec = kbuf + i * GYRO_REC_SIZE;
 		u32 type, bx, by;
-		int vx, vy;
 
 		memcpy(&type, rec + GYRO_OFF_TYPE, 4);
 		if (!kairos_type_match(type))
@@ -167,28 +214,9 @@ int kairos_gyro_patch(unsigned int seq, void __user *data, size_t len)
 
 		memcpy(&bx, rec + GYRO_OFF_X, 4);
 		memcpy(&by, rec + GYRO_OFF_Y, 4);
-		vx = (int)bx;
-		vy = (int)by;
 
-		switch (gyro_mode) {
-		case 1:				/* X/Y 互换并取反 */
-			bx = kairos_f32_neg((u32)vy);
-			by = kairos_f32_neg((u32)vx);
-			break;
-		case 2:				/* 双取反 */
-			bx = kairos_f32_neg(bx);
-			by = kairos_f32_neg(by);
-			break;
-		case 3:				/* 只互换 */
-			bx = (u32)vy;
-			by = (u32)vx;
-			break;
-		default:			/* 正常：只缩放 */
-			break;
-		}
-
-		bx = kairos_f32_scale(bx, gyro_scale_x);
-		by = kairos_f32_scale(by, gyro_scale_y);
+		bx = kairos_f32_add(bx, off_x);
+		by = kairos_f32_add(by, off_y);
 
 		memcpy(rec + GYRO_OFF_X, &bx, 4);
 		memcpy(rec + GYRO_OFF_Y, &by, 4);
@@ -233,7 +261,7 @@ void kairos_gyro_set(int enable, int mode, int sx, int sy, int mask)
 {
 	WRITE_ONCE(gyro_enable, enable);
 	WRITE_ONCE(gyro_mode, mode);
-	WRITE_ONCE(gyro_scale_x, sx);
-	WRITE_ONCE(gyro_scale_y, sy);
+	WRITE_ONCE(gyro_par_a, (u32)sx);
+	WRITE_ONCE(gyro_par_b, (u32)sy);
 	WRITE_ONCE(gyro_type_mask, mask);
 }
