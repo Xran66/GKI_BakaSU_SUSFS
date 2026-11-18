@@ -256,13 +256,14 @@ long kairos_dispatch(struct file *file, u32 magic, u32 op, void __user *uarg)
 		 * 现在改成长驻：清掉认证状态和 mm 引用，让 g_ctx 回到 NULL，
 		 * 下次握手会重新装一个新 fd。要真正停用只能重启（或卸载模块）。
 		 */
-		ctx->authed = 0;
-		ctx->magic = 0;
-		if (ctx->mm) {
-			mmput(ctx->mm);
-			ctx->mm = NULL;
-			ctx->mm_pid = 0;
-		}
+		/*
+		 * 只解绑全局指针，**不清 magic / authed / mm**。
+		 *
+		 * 客户端是多进程共用同一个 fd：主进程关掉某个子窗口就发一次
+		 * OP_EXIT，如果这里把 magic 清 0，所有继承该 fd 的工作进程
+		 * 会立刻被 dispatch 判 -ENOTTY(-25) —— 就是"驱动连着但读不到数据"。
+		 */
+		(void)ctx;
 		kairos_release_ctx();
 		return 0;
 
