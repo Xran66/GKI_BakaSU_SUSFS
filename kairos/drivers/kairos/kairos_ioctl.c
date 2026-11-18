@@ -71,6 +71,68 @@ static unsigned long kairos_find_module_base(struct mm_struct *mm, const char *n
 	return ret;
 }
 
+/* ================================================================== */
+/* batch read/write (0x801/0x8D1 read, 0x802 write), 64KB chunks       */
+/* ================================================================== */
+static long kairos_do_range(void __user *uarg, bool write)
+{
+	struct {
+		__u32 pid;
+		__u32 pad;
+		__u64 va;
+		__u64 buf;
+		__u64 len;
+	} r;
+	struct mm_struct *mm;
+	unsigned long off = 0;
+	void *kbuf;
+	long ret = 0;
+
+	if (copy_from_user(&r, uarg, sizeof(r)))
+		return -EFAULT;
+	if (!r.len || r.len > 0xA00000 || r.va < 0x1000)
+		return -EINVAL;
+
+	mm = r.pid ? kairos_grab_mm_by_pid(r.pid) : get_task_mm(current);
+	if (!mm)
+		return -ESRCH;
+
+	kbuf = kvzalloc(SZ_64K, GFP_KERNEL);
+	if (!kbuf) {
+		mmput(mm);
+		return -ENOMEM;
+	}
+
+	while (off < r.len) {
+		unsigned long n = min_t(unsigned long, SZ_64K, r.len - off);
+
+		if (write) {
+			if (copy_from_user(kbuf, (void __user *)(r.buf + off), n)) {
+				ret = -EFAULT;
+				break;
+			}
+			if (kairos_write_to_mm(mm, r.va + off, kbuf, n, true) != n) {
+				ret = -EINVAL;
+				break;
+			}
+		} else {
+			if (kairos_read_to_kbuf(mm, r.va + off, kbuf, n) != n) {
+				ret = -EINVAL;
+				break;
+			}
+			if (copy_to_user((void __user *)(r.buf + off), kbuf, n)) {
+				ret = -EFAULT;
+				break;
+			}
+		}
+		off += n;
+	}
+
+	kvfree(kbuf);
+	mmput(mm);
+	return ret;
+}
+
 static long kairos_do_mem(struct kairos_ctx *ctx, void __user *uarg)
 {
 	struct kairos_mem_req r;
@@ -236,21 +298,26 @@ long kairos_dispatch(struct file *file, u32 magic, u32 op, void __user *uarg)
 	case KOP_GET_FPSTATE:
 	case KOP_GET_SIGSEGV:
 		return -EOPNOTSUPP;
-
-	/* 0x801/0x802/0x803 在原版里是"设置目标进程"类命令（写 ctx->mm_pid），
-	 * 具体字段布局还没从 dispatch_request 里逐条核对，这里只做参数探测，
-	 * 不落任何状态 —— 避免用错的布局把 mm 引用搞坏。 */
+	/*
+	 * 0x801 / 0x8D1: batch read    0x802: batch write
+	 *
+	 * 32-byte request:
+	 *   [0x00] u32 pid   [0x04] u32 pad
+	 *   [0x08] u64 va    [0x10] u64 buf   [0x18] u64 len
+	 * (va >= 0x1000, len <= 0xA00000)  -- 64KB chunks, 0 on success / -EINVAL
+	 *
+	 * 之前这四个 case 被合并成"模块基址"逻辑，参数布局完全不同，
+	 * 客户端用它取数据必然失败 —— UI 取不到数据的直接原因。
+	 */
 	case KOP_0x801:
 	case KOP_0x8D1:
+		return kairos_do_range(uarg, false);
+
 	case KOP_0x802:
+		return kairos_do_range(uarg, true);
+
+	/* 0x803: module base by file name (24-byte in/out) */
 	case KOP_0x803: {
-		/*
-		 * 按文件名查模块基址。请求/回复共用一个 24 字节结构体：
-		 *   [0x00] u32 pid     目标进程（0 = 当前进程）
-		 *   [0x04] u32 pad
-		 *   [0x08] u64 name    用户态字符串指针（文件名，如 libUE4.so）
-		 *   [0x10] u64 base    返回：命中 VMA 的 vm_start，未命中 0
-		 */
 		struct {
 			__u32 pid;
 			__u32 pad;
