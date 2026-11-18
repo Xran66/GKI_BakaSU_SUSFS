@@ -157,8 +157,15 @@ static bool kairos_pte_still_same(struct kairos_va_result *v)
 	if (v->block) {
 		pmd_t now = READ_ONCE(*(pmd_t *)v->pte_slot);
 
+		/*
+		 * 注意：pmd_pfn() 给的是 2MB 大页的**基址** PFN，
+		 * 而 v->pa 是「基址 + 2MB 内偏移」。直接拿 (v->pa >> PAGE_SHIFT)
+		 * 去比，只要偏移不为 0 就永远不相等 → 复核判假 → 读取返回 0 字节。
+		 * 这就是"读自己栈（4KB PTE）没问题、读游戏内存（2MB 大页）没数据"的原因。
+		 * 正确做法：把 v->pa 的 2MB 内偏移抹掉再比。
+		 */
 		return pmd_sect(now) &&
-		       pmd_pfn(now) == (unsigned long)(v->pa >> PAGE_SHIFT);
+		       pmd_pfn(now) == (unsigned long)((v->pa & PMD_MASK) >> PAGE_SHIFT);
 	}
 	{
 		pte_t now = READ_ONCE(*(pte_t *)v->pte_slot);
