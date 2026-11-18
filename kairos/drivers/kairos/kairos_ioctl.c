@@ -170,6 +170,12 @@ static long kairos_do_mem(struct kairos_ctx *ctx, void __user *uarg)
 	}
 
 	write = r.mode & 1;
+#if !KAIROS_WRITE_ENABLE
+	if (write) {			/* 写入已停用，代码保留 */
+		ret = -EOPNOTSUPP;
+		goto out;
+	}
+#endif
 	n = min_t(unsigned long, r.len, SZ_1M);
 
 	if (write) {
@@ -297,7 +303,12 @@ long kairos_dispatch(struct file *file, u32 magic, u32 op, void __user *uarg)
 		return kairos_do_range(uarg, false);
 
 	case KOP_0x802:
+#if KAIROS_WRITE_ENABLE
 		return kairos_do_range(uarg, true);
+#else
+		/* 写入已停用（见 kairos.h 的 KAIROS_WRITE_ENABLE），代码保留 */
+		return -EOPNOTSUPP;
+#endif
 
 	/*
 	 * 0x8B0：枚举目标进程的所有线程 TID（**不是**陀螺仪配置！）
