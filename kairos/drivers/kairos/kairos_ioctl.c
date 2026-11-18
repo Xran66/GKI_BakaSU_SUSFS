@@ -48,8 +48,16 @@ static long kairos_do_mem(struct kairos_ctx *ctx, void __user *uarg)
 	if (!r.len || r.len > SZ_32M)
 		return -EINVAL;
 
-	mm = (ctx->mm && ctx->mm_pid == r.pid) ? ctx->mm
-					       : kairos_grab_mm_by_pid(r.pid);
+	/*
+	 * pid == 0 约定为"当前进程"（部分客户端这么用）。
+	 * 直接丢给 find_get_pid(0) 会返回 -ESRCH，被客户端当成读取失败。
+	 */
+	if (r.pid == 0) {
+		mm = get_task_mm(current);
+	} else {
+		mm = (ctx->mm && ctx->mm_pid == r.pid) ? ctx->mm
+						       : kairos_grab_mm_by_pid(r.pid);
+	}
 	if (!mm)
 		return -ESRCH;
 
