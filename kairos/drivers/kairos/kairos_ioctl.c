@@ -131,6 +131,16 @@ long kairos_dispatch(struct file *file, u32 magic, u32 op, void __user *uarg)
 		return kairos_do_mem(ctx, uarg);
 
 	case KOP_EXIT:
+		/*
+		 * 只解绑本次会话，**不关停驱动**。
+		 *
+		 * 原来这里调 kairos_shutdown_locked() 会把 kairos_initialized 清 0，
+		 * 结果是客户端一次 OP_EXIT 之后整个开机内都握手失败，
+		 * 必须重启设备才能再用一次。
+		 *
+		 * 现在改成长驻：清掉认证状态和 mm 引用，让 g_ctx 回到 NULL，
+		 * 下次握手会重新装一个新 fd。要真正停用只能重启（或卸载模块）。
+		 */
 		ctx->authed = 0;
 		ctx->magic = 0;
 		if (ctx->mm) {
@@ -138,7 +148,7 @@ long kairos_dispatch(struct file *file, u32 magic, u32 op, void __user *uarg)
 			ctx->mm = NULL;
 			ctx->mm_pid = 0;
 		}
-		kairos_shutdown_locked();
+		kairos_release_ctx();
 		return 0;
 
 	/* 以下命令 .ko 版存在但本次未复刻（触摸注入 / 抓包 / PAC 读写）。
