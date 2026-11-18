@@ -34,6 +34,43 @@ struct kairos_mem_req {
 	u32	pad2;
 };
 
+/* ================================================================== */
+/* 按文件名查模块基址（对应原版 dispatch 的 0x803）                     */
+/*                                                                     */
+/* 原版实现：grab_mm_by_pid → down_read(mmap_lock) → 遍历 VMA，        */
+/*   比 vma->vm_file->f_path.dentry->d_name.name 与传入字符串，        */
+/*   命中就返回 vma->vm_start；没命中返回 0。                          */
+/* 客户端用它"等游戏模块出现"，拿不到就一直每秒轮询。                  */
+/* ================================================================== */
+static unsigned long kairos_find_module_base(struct mm_struct *mm, const char *name)
+{
+	struct vm_area_struct *vma;
+	unsigned long ret = 0;
+
+	if (!name || !name[0])
+		return 0;
+
+	mmap_read_lock(mm);
+	{
+		VMA_ITERATOR(vmi, mm, 0);
+
+		for_each_vma(vmi, vma) {
+			const char *fn;
+
+			if (!vma->vm_file)
+				continue;
+			fn = vma->vm_file->f_path.dentry->d_name.name;
+			if (fn && !strcmp(fn, name)) {
+				ret = vma->vm_start;
+				break;
+			}
+		}
+	}
+	mmap_read_unlock(mm);
+
+	return ret;
+}
+
 static long kairos_do_mem(struct kairos_ctx *ctx, void __user *uarg)
 {
 	struct kairos_mem_req r;
@@ -206,10 +243,40 @@ long kairos_dispatch(struct file *file, u32 magic, u32 op, void __user *uarg)
 	case KOP_0x801:
 	case KOP_0x8D1:
 	case KOP_0x802:
-	case KOP_0x803:
-		if (copy_from_user(buf, uarg, 0x20))
+	case KOP_0x803: {
+		/*
+		 * 按文件名查模块基址。请求/回复共用一个 24 字节结构体：
+		 *   [0x00] u32 pid     目标进程（0 = 当前进程）
+		 *   [0x04] u32 pad
+		 *   [0x08] u64 name    用户态字符串指针（文件名，如 libUE4.so）
+		 *   [0x10] u64 base    返回：命中 VMA 的 vm_start，未命中 0
+		 */
+		struct {
+			__u32 pid;
+			__u32 pad;
+			__u64 name;
+			__u64 base;
+		} r;
+		char name[256];
+		struct mm_struct *mm;
+
+		if (copy_from_user(&r, uarg, sizeof(r)))
+			return -EFAULT;
+		memset(name, 0, sizeof(name));
+		if (r.name && copy_from_user(name, (void __user *)r.name, sizeof(name) - 1))
+			return -EFAULT;
+
+		mm = r.pid ? kairos_grab_mm_by_pid(r.pid) : get_task_mm(current);
+		if (!mm)
+			return -ESRCH;
+
+		r.base = (__u64)kairos_find_module_base(mm, name);
+		mmput(mm);
+
+		if (copy_to_user(uarg, &r, sizeof(r)))
 			return -EFAULT;
 		return 0;
+	}
 
 	default:
 		return -ENOTTY;
