@@ -72,6 +72,16 @@ on:
         required: false
         type: boolean
         default: false
+      use_skroot:
+        description: "SKRoot 二进制补丁（替代 KernelSU 提权，不动 SELinux）"
+        required: false
+        type: boolean
+        default: false
+      skroot_key:
+        description: "SKRoot root 密匙（47 字符，留空随机生成）"
+        required: false
+        type: string
+        default: ""
       use_prop_spoof:
         description: "集成 prop_spoof 属性伪装（内建，参数由配套模块注入）"
         required: false
@@ -1053,7 +1063,9 @@ jobs:
         run: cp "$DEFCONFIG" "$DEFCONFIG.orig"
 
       - name: 集成 NoMount 挂载元模块
-        if: ${{ inputs.clean_build != true && inputs.use_nomount }}
+        # 不依赖 KernelSU：NoMount 的控制面是 add_key("nomount","trigger")，
+        # 用户态 nm 有 root 就能下发规则；metamodule 只是它在 KSU 里的安装形态。
+        if: ${{ inputs.use_nomount }}
         working-directory: ${{ env.KERNEL_ROOT }}/common
         run: |
           set -euo pipefail
@@ -1481,6 +1493,57 @@ jobs:
 
           cp "$SRC_DIR/Image" ./
 
+      # ==================== SKRoot 内核修补 ====================
+      # 纯二进制补丁，不编 KernelSU：
+      #   do_execve  : 文件名 == root key 时把 cred 改成 uid0+全 capability、清 seccomp
+      #   avc_denied : 只对「uid0 + securebits0 + 全 cap」的进程把返回值改成 0（允许）
+      #   audit_log  : 同一判定，不发审计
+      #   filldir64  : 前 16 字节等于 key 的目录项从 getdents 里抹掉
+      # SELinux 策略一条没改，没有 setenforce、没有 policy reload、没有 mount。
+      - name: SKRoot 修补内核
+        if: ${{ inputs.use_skroot }}
+        run: |
+          set -euo pipefail
+          SRC="$GITHUB_WORKSPACE/kairos/skroot/patch_kernel_root"
+          if [ ! -d "$SRC" ]; then
+            echo "::error::找不到 $SRC"
+            exit 1
+          fi
+          make -C "$SRC" -j"$(nproc)" 2>&1 | tail -15
+
+          KEY="${{ inputs.skroot_key }}"
+          if [ -z "$KEY" ]; then
+            KEY=$(head -c 512 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 47)
+            echo "未指定 key，已随机生成"
+          fi
+          case "${#KEY}" in
+            47) ;;
+            *) echo "::warning::key 长度 ${#KEY} != 47，将按前 47 字符处理" ;;
+          esac
+          KEY=${KEY:0:47}
+          echo "SKROOT_KEY=$KEY" >> "$GITHUB_ENV"
+          printf '%s' "$KEY" > skroot_root_key.txt
+
+          cp Image Image.orig
+          "$SRC/patch_kernel_root" Image "$KEY" 2>&1 | tee skroot_patch.log
+
+          if cmp -s Image Image.orig; then
+            echo "::error::SKRoot 补丁未写入（Image 与原始完全一致）"
+            tail -40 skroot_patch.log
+            exit 1
+          fi
+          echo "Image: $(stat -c%s Image.orig) -> $(stat -c%s Image) bytes"
+          if ! grep -q '^Done\.' skroot_patch.log; then
+            echo "::warning::补丁日志里没有 Done.，请检查 skroot_patch.log"
+          fi
+
+          {
+            echo "### SKRoot"
+            echo ""
+            echo "- root key: \`$KEY\`"
+            echo "- Image: $(stat -c%s Image.orig) -> $(stat -c%s Image) 字节"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       # 使用与普通内核完全相同的构建参数，确保两个 Image 只在校验逻辑上不同。
       # ==================== 打包并签名 boot 镜像 ====================
       # 目的：构建完直接产出「签好名、可直接 fastboot/dd 刷入」的 boot 镜像，
@@ -1697,6 +1760,8 @@ jobs:
           path: |
             *AnyKernel3.zip
             *-boot-signed.img
+            skroot_root_key.txt
+            skroot_patch.log
           compression-level: 0
 
       # ==================== 上传补丁冲突文件 ====================

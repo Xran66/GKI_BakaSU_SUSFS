@@ -1,0 +1,285 @@
+#include "patch_kernel_root.h"
+#include "analyze/base_func.h"
+#include "analyze/symbol_analyze.h"
+#include "patch_do_execve.h"
+#include "patch_current_avc_check.h"
+#include "patch_avc_denied.h"
+#include "patch_audit_log_start.h"
+#include "patch_filldir64.h"
+#include "patch_compat_filldir.h"
+
+#include "3rdparty/find_mrs_register.h"
+#include "3rdparty/find_imm_register_offset.h"
+#include "3rdparty/find_adrp_target.h"
+
+struct PatchKernelOffset {
+	size_t cred_offset = 0;
+	size_t cred_uid_offset = 0;
+	size_t seccomp_offset = 0;
+	uint64_t huawei_kti_addr = 0;
+};
+
+struct PatchKernelResult {
+	bool patched = false;
+	size_t root_key_start = 0;
+};
+
+bool check_file_path(const char* file_path) {
+	return std::filesystem::path(file_path).extension() != ".img";
+}
+
+bool parser_cred_offset(const std::vector<char>& file_buf, const SymbolRegion &symbol, size_t& cred_offset) {
+	using namespace a64_find_mrs_register;
+	std::vector<track_reg_info>track_info;
+	if (!find_current_task_next_register_offset(file_buf, symbol.offset, symbol.offset + symbol.size, track_info)) return false;
+	cred_offset = 0;
+	for (auto& t : track_info) {
+		if (t.load_offset > 0x400) { cred_offset = t.load_offset; break; }
+	}
+	return cred_offset > 0;
+}
+
+bool parse_cred_uid_offset(const std::vector<char>& file_buf, const SymbolRegion& symbol, size_t cred_offset, size_t& cred_uid_offset) {
+	using namespace a64_find_imm_register_offset;
+	cred_uid_offset = 0;
+	KernelVersionParser kernel_ver(file_buf);
+	size_t min_off = 8;
+	if (kernel_ver.is_kernel_version_less("6.6.8")) min_off = 4;
+
+	std::vector<int64_t> candidate_offsets;
+	if (!find_imm_register_offset(file_buf, symbol.offset, symbol.offset + symbol.size, candidate_offsets)) return false;
+
+	auto it = std::find(candidate_offsets.begin(), candidate_offsets.end(), cred_offset);
+	if (it != candidate_offsets.end()) {
+		for (++it; it != candidate_offsets.end(); ++it) {
+			if (*it > 0x20 || *it < min_off) continue;
+			cred_uid_offset = *it;
+			break;
+		}
+	}
+	return cred_uid_offset != 0;
+}
+
+bool parser_seccomp_offset(const std::vector<char>& file_buf, const SymbolRegion& symbol, size_t& seccomp_offset) {
+	using namespace a64_find_mrs_register;
+	std::vector<track_reg_info>track_info;
+	if (!find_current_task_next_register_offset(file_buf, symbol.offset, symbol.offset + symbol.size, track_info)) return false;
+	seccomp_offset = 0;
+	for (auto& t : track_info) {
+		if (t.load_offset > 0x400) { seccomp_offset = t.load_offset; break; }
+	}
+	return seccomp_offset > 0;
+}
+
+bool parser_huawei_kti_addr(const std::vector<char>& file_buf, const SymbolRegion& symbol, uint64_t& kti_addr) {
+	using namespace a64_find_adrp_target;
+	if (symbol.size == 0) return false;
+	if (!find_adrp_target(file_buf, symbol.offset, symbol.offset + symbol.size, kti_addr)) return false;
+	return kti_addr > 0;
+}
+
+void cfi_bypass(const std::vector<char>& file_buf, KernelSymbolOffset &sym, std::vector<patch_bytes_data>& vec_patch_bytes_data) {
+	if (sym.__cfi_check.offset) PATCH_AND_CONSUME(sym.__cfi_check, patch_ret_cmd(file_buf, sym.__cfi_check.offset, vec_patch_bytes_data));
+	patch_ret_cmd(file_buf, sym.__cfi_check_fail, vec_patch_bytes_data);
+	patch_ret_cmd(file_buf, sym.__cfi_slowpath_diag, vec_patch_bytes_data);
+	patch_ret_cmd(file_buf, sym.__cfi_slowpath, vec_patch_bytes_data);
+	patch_ret_cmd(file_buf, sym.__ubsan_handle_cfi_check_fail_abort, vec_patch_bytes_data);
+	patch_ret_cmd(file_buf, sym.__ubsan_handle_cfi_check_fail, vec_patch_bytes_data);
+	patch_ret_1_cmd(file_buf, sym.report_cfi_failure, vec_patch_bytes_data);
+}
+
+void huawei_bypass(const std::vector<char>& file_buf, KernelSymbolOffset &sym, std::vector<patch_bytes_data>& vec_patch_bytes_data) {
+	patch_ret_0_cmd(file_buf, sym.hkip_check_uid_root, vec_patch_bytes_data);
+	patch_ret_0_cmd(file_buf, sym.hkip_check_gid_root, vec_patch_bytes_data);
+	patch_ret_0_cmd(file_buf, sym.hkip_check_xid_root, vec_patch_bytes_data);
+}
+
+PatchKernelResult patch_kernel_handler(const std::vector<char>& file_buf, const PatchKernelOffset& off, KernelSymbolOffset& sym, std::vector<patch_bytes_data>& vec_patch_bytes_data) {
+	KernelVersionParser kernel_ver(file_buf);
+	PatchBase patchBase(file_buf, off.cred_uid_offset, { .kti_addr = off.huawei_kti_addr });
+	PatchDoExecve patchDoExecve(patchBase, sym);
+	PatchCurrentAvcCheck patchCurrentAvcCheck(patchBase);
+	PatchAvcDenied patchAvcDenied(patchBase, sym.avc_denied);
+	PatchAuditLogStart patchAuditLogStart(patchBase, sym.audit_log_start);
+	PatchFilldir64 patchFilldir64(patchBase, sym.filldir64);
+	PatchCompatFilldir patchCompatFilldir(patchBase, sym.compat_filldir);
+
+	bool patched = true;
+	PatchKernelResult r;
+	if (kernel_ver.is_kernel_version_less("6.1.0")) {
+		SymbolRegion next_empty_region = { 0x200, 0x300 };
+		if (sym.__cfi_check.offset && sym.__cfi_check.size > next_empty_region.size) next_empty_region = sym.__cfi_check;
+		auto start_b_location = next_empty_region.offset;
+		PATCH_AND_CONSUME(next_empty_region, 4);
+		r.root_key_start = next_empty_region.offset;
+		PATCH_AND_CONSUME(next_empty_region, patchDoExecve.patch_do_execve(next_empty_region, off.cred_offset, off.seccomp_offset, vec_patch_bytes_data));
+		PATCH_AND_CONSUME(next_empty_region, patchFilldir64.patch_filldir64_root_key_guide(r.root_key_start, next_empty_region, vec_patch_bytes_data));
+		PATCH_AND_CONSUME(next_empty_region, patchFilldir64.patch_filldir64_core(next_empty_region, vec_patch_bytes_data));
+		PATCH_AND_CONSUME(next_empty_region, patchCompatFilldir.patch_compat_filldir_root_key_guide(r.root_key_start, next_empty_region, vec_patch_bytes_data));
+		PATCH_AND_CONSUME(next_empty_region, patchCompatFilldir.patch_compat_filldir_core(next_empty_region, vec_patch_bytes_data));
+		auto current_avc_check_bl_func = next_empty_region.offset;
+		PATCH_AND_CONSUME(next_empty_region, patchCurrentAvcCheck.patch_current_avc_check_bl_func(next_empty_region, off.cred_offset, vec_patch_bytes_data));
+		PATCH_AND_CONSUME(next_empty_region, patchAvcDenied.patch_avc_denied(next_empty_region, current_avc_check_bl_func, vec_patch_bytes_data));
+		PATCH_AND_CONSUME(next_empty_region, patchAuditLogStart.patch_audit_log_start(next_empty_region, current_avc_check_bl_func, vec_patch_bytes_data));
+		auto end_b_location = next_empty_region.offset;
+		patchBase.patch_jump(start_b_location, end_b_location, vec_patch_bytes_data);
+	} else if (sym.die.offset && sym.__drm_puts_coredump.offset && sym.__drm_printfn_coredump.offset) {
+		PATCH_AND_CONSUME(sym.__drm_printfn_coredump, patch_ret_cmd(file_buf, sym.__drm_printfn_coredump.offset, vec_patch_bytes_data));
+		PATCH_AND_CONSUME(sym.__drm_puts_coredump, patch_ret_cmd(file_buf, sym.__drm_puts_coredump.offset, vec_patch_bytes_data));
+		r.root_key_start = sym.die.offset;
+		PATCH_AND_CONSUME(sym.die, patchDoExecve.patch_do_execve(sym.die, off.cred_offset, off.seccomp_offset, vec_patch_bytes_data));
+		PATCH_AND_CONSUME(sym.die, patchFilldir64.patch_filldir64_root_key_guide(r.root_key_start, sym.die, vec_patch_bytes_data));
+		PATCH_AND_CONSUME(sym.die, patchFilldir64.patch_jump(sym.die.offset, sym.__drm_puts_coredump.offset, vec_patch_bytes_data));
+		PATCH_AND_CONSUME(sym.__drm_puts_coredump, patchFilldir64.patch_filldir64_core(sym.__drm_puts_coredump, vec_patch_bytes_data));
+		PATCH_AND_CONSUME(sym.die, patchCompatFilldir.patch_compat_filldir_root_key_guide(r.root_key_start, sym.die, vec_patch_bytes_data));
+		PATCH_AND_CONSUME(sym.die, patchCompatFilldir.patch_jump(sym.die.offset, sym.__drm_puts_coredump.offset, vec_patch_bytes_data));
+		PATCH_AND_CONSUME(sym.__drm_puts_coredump, patchCompatFilldir.patch_compat_filldir_core(sym.__drm_puts_coredump, vec_patch_bytes_data));
+		auto current_avc_check_bl_func = sym.__drm_printfn_coredump.offset;
+		PATCH_AND_CONSUME(sym.__drm_printfn_coredump, patchCurrentAvcCheck.patch_current_avc_check_bl_func(sym.__drm_printfn_coredump, off.cred_offset, vec_patch_bytes_data));
+		PATCH_AND_CONSUME(sym.__drm_printfn_coredump, patchAvcDenied.patch_avc_denied(sym.__drm_printfn_coredump, current_avc_check_bl_func, vec_patch_bytes_data));
+		PATCH_AND_CONSUME(sym.__drm_printfn_coredump, patchAuditLogStart.patch_audit_log_start(sym.__drm_printfn_coredump, current_avc_check_bl_func, vec_patch_bytes_data));
+	} else {
+		patched = false;
+	}
+	r.patched = patched;
+	return r;
+}
+
+void write_all_patch(const char* file_path, std::vector<patch_bytes_data>& vec_patch_bytes_data) {
+	for (auto& item : vec_patch_bytes_data) {
+		std::shared_ptr<char> spData(new (std::nothrow) char[item.str_bytes.length() / 2], std::default_delete<char[]>());
+		hex2bytes((uint8_t*)item.str_bytes.c_str(), (uint8_t*)spData.get());
+		if (!write_file_bytes(file_path, item.write_addr, spData.get(), item.str_bytes.length() / 2)) {
+			std::cout << "写入文件发生错误" << std::endl;
+		}
+	}
+	if (vec_patch_bytes_data.size()) std::cout << "Done." << std::endl;
+}
+
+int main(int argc, char* argv[]) {
+	++argv;
+	--argc;
+
+	std::cout << "本工具用于生成SKRoot(Lite) ARM64 Linux内核ROOT提权代码 V12" << std::endl << std::endl;
+
+#ifdef _DEBUG
+#else
+	if (argc < 1) {
+		std::cout << "无输入文件" << std::endl;
+		system("pause");
+		return 0;
+	}
+#endif
+
+#ifdef _DEBUG
+#else
+	const char* file_path = argv[0];
+#endif
+	std::cout << file_path << std::endl << std::endl;
+	if (!check_file_path(file_path)) {
+		std::cout << "Please enter the correct Linux kernel binary file path. " << std::endl;
+		std::cout << "For example, if it is boot.img, you need to first decompress boot.img and then extract the kernel file inside." << std::endl;
+		system("pause");
+		return 0;
+	}
+
+	std::vector<char> file_buf = read_file_buf(file_path);
+	if (!file_buf.size()) {
+		std::cout << "Fail to open file:" << file_path << std::endl;
+		system("pause");
+		return 0;
+	}
+
+	SymbolAnalyze symbol_analyze(file_buf);
+	if (!symbol_analyze.analyze_kernel_symbol()) {
+		std::cout << "Failed to analyze kernel symbols" << std::endl;
+		system("pause");
+		return 0;
+	}
+
+	KernelSymbolOffset sym = symbol_analyze.get_symbol_offset();
+	uint64_t anchor_off = sym.die.offset;
+
+	PatchKernelOffset off;
+	if (!parser_cred_offset(file_buf, sym.sys_getuid, off.cred_offset)) {
+		std::cout << "Failed to parse cred offset" << std::endl;
+		system("pause");
+		return 0;
+	}
+
+	if (!parse_cred_uid_offset(file_buf, sym.sys_getuid, off.cred_offset, off.cred_uid_offset)) {
+		std::cout << "Failed to parse cred uid offset" << std::endl;
+		system("pause");
+		return 0;
+	}
+	std::cout << "cred uid offset:" << off.cred_uid_offset << std::endl;
+
+	if (!parser_seccomp_offset(file_buf, sym.prctl_get_seccomp, off.seccomp_offset)) {
+		std::cout << "Failed to parse seccomp offset" << std::endl;
+		system("pause");
+		return 0;
+	}
+	std::cout << "cred offset:" << off.cred_offset << std::endl;
+	std::cout << "seccomp offset:" << off.seccomp_offset << std::endl;
+
+	parser_huawei_kti_addr(file_buf, sym.kti_randomize_init, off.huawei_kti_addr);
+	if(off.huawei_kti_addr) std::cout << "kti addr:" << off.huawei_kti_addr << std::endl;
+
+	std::vector<patch_bytes_data> vec_patch_bytes_data;
+	cfi_bypass(file_buf, sym, vec_patch_bytes_data);
+	huawei_bypass(file_buf, sym, vec_patch_bytes_data);
+
+	size_t first_hook_start = 0;
+	PatchKernelResult pr = patch_kernel_handler(file_buf, off, sym, vec_patch_bytes_data);
+	if (!pr.patched) {
+		std::cout << "Failed to find hook start addr" << std::endl;
+		system("pause");
+		return 0;
+	}
+
+	std::string str_root_key;
+	bool auto_write = false;
+
+	/* 非交互模式： patch_kernel_root <Image> <key>
+	 * CI 里用这个，避免 std::cin 卡住。 */
+	if (argc >= 2 && argv[1] && argv[1][0]) {
+		str_root_key = argv[1];
+		auto_write = true;
+	} else {
+		size_t is_need_create_root_key = 0;
+		std::cout << std::endl << "请选择是否需要自动随机生成ROOT密匙（1需要；2不需要）：" << std::endl;
+		std::cin >> std::dec >> is_need_create_root_key;
+		if (is_need_create_root_key == 1) {
+			str_root_key = generate_random_str(ROOT_KEY_LEN);
+		} else {
+			std::cout << "请输入ROOT密匙（48个字符的字符串，包含大小写和数字）：" << std::endl;
+			std::cin >> str_root_key;
+			std::cout << std::endl;
+		}
+	}
+
+	/* key 槽只有 ROOT_KEY_LEN 字节，末字节必须是 NUL，真正生效的是前
+	 * ROOT_KEY_LEN-1 个字符（do_execve 的比较循环遇到 key 的 NUL 结束）。
+	 * 统一截断，保证打印出来的字符串就是客户端该用的那个。 */
+	if (str_root_key.size() >= ROOT_KEY_LEN)
+		str_root_key.resize(ROOT_KEY_LEN - 1);
+	patch_data(file_buf, pr.root_key_start, (void*)str_root_key.c_str(), str_root_key.size() + 1, vec_patch_bytes_data);
+
+	std::cout << "#获取ROOT权限的密匙(Key): " << str_root_key.c_str() << std::endl << std::endl;
+
+	if (auto_write) {
+		std::cout << "#非交互模式，直接写入" << std::endl;
+		write_all_patch(file_path, vec_patch_bytes_data);
+	} else {
+		size_t need_write_modify_in_file = 0;
+		std::cout << "#是否需要立即写入修改到文件？（1需要；2不需要）：" << std::endl;
+		std::cin >> std::dec >> need_write_modify_in_file;
+		if (need_write_modify_in_file == 1) {
+			std::cout << "#正在写入，请稍后..." << std::endl;
+			write_all_patch(file_path, vec_patch_bytes_data);
+		}
+	}
+
+	system("pause");
+	return 0;
+}

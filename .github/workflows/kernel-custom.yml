@@ -108,6 +108,16 @@ on:
         required: false
         type: boolean
         default: false
+      use_skroot:
+        description: "用 SKRoot 二进制补丁替代 KernelSU 提权（建议配合纯净构建）"
+        required: false
+        type: boolean
+        default: false
+      skroot_key:
+        description: "SKRoot root 密匙（47 字符，留空自动随机生成）"
+        required: false
+        type: string
+        default: ""
       use_prop_spoof:
         description: "集成 prop_spoof 属性/机型伪装（内建，参数由配套模块注入）"
         required: false
@@ -243,5 +253,7 @@ jobs:
       use_zram: ${{ inputs.use_zram }}
       enable_susfs: ${{ !inputs.cancel_susfs }}
       use_nomount: ${{ inputs.use_nomount || false }}
+      use_skroot: ${{ inputs.use_skroot || false }}
+      skroot_key: ${{ inputs.skroot_key || '' }}
       use_prop_spoof: ${{ inputs.use_prop_spoof || false }}
       prop_spoof_trace: ${{ inputs.prop_spoof_trace || false }}
