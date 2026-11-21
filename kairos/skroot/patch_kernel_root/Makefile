@@ -14,7 +14,7 @@ DEFINES := \
   -DCAPSTONE_HAS_ARM64 \
   -DCAPSTONE_USE_SYS_DYN_MEM
 
-CXXFLAGS := -std=c++20 -O2 -Wall -Wextra $(DEFINES) $(INCLUDES)
+CXXFLAGS := -std=c++20 -O2 -Wall -Wextra $(DEFINES) $(INCLUDES) -include skroot_portability.h
 CFLAGS   := -O2 -Wall -Wextra $(DEFINES) $(INCLUDES)
 
 LIBS := -ldl -pthread
