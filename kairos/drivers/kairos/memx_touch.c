@@ -77,12 +77,31 @@ static int			g_evq_n;
 /* ================================================================== */
 /* 设备与 fd 定位                                                      */
 /* ================================================================== */
+/*
+ * input_class 里同时挂着两类设备：
+ *   inputN —— 真正的 struct input_dev（dev.devt 恒为 0）
+ *   eventN —— evdev 节点（dev.devt = MKDEV(INPUT_MAJOR, minor)，parent 指向 inputN）
+ *
+ * 对 eventN 的 device 做 to_input_dev()/container_of 只会得到一块无关内存，
+ * 那里读出来的 absbit 是垃圾，偶发能让 ABS_MT_POSITION_X 的 test_bit 通过，
+ * 于是 g_tdev 被填成一个伪指针：后续 input_event() 在
+ * is_event_supported(type, dev->evbit, EV_MAX) 处直接 return，
+ * 事件根本没进 input 核心 —— 表现就是"注入全部成功、屏幕毫无反应"。
+ *
+ * 所以先按 devt 过滤，只留 input_dev。
+ */
 static int memx_touch_match(struct device *dev, void *data)
 {
-	struct input_dev *idev = to_input_dev(dev);
+	struct input_dev *idev;
 	struct input_dev **out = (struct input_dev **)data;
 
+	if (!dev || dev->devt)
+		return 0;
+
+	idev = to_input_dev(dev);
 	if (!idev)
+		return 0;
+	if (!test_bit(EV_ABS, idev->evbit))
 		return 0;
 	if (!test_bit(ABS_MT_POSITION_X, idev->absbit) ||
 	    !test_bit(ABS_MT_POSITION_Y, idev->absbit))
@@ -382,12 +401,10 @@ int memx_touch_attach(int screen_w, int screen_h, int orientation)
 
 	memx_normalize_dims();
 
-#ifdef MEMX_VERBOSE
 	pr_info("memx_touch: dev=%s abs_x=[%d,%d] abs_y=[%d,%d] screen=%dx%d orient=%d\n",
 		dev->name ? dev->name : "?",
 		g_hw_min_x, g_hw_max_x, g_hw_min_y, g_hw_max_y,
 		g_screen_w, g_screen_h, g_orient);
-#endif
 
 	memset(g_slot_down, 0, sizeof(g_slot_down));
 	memset(g_slot_tid, 0, sizeof(g_slot_tid));
@@ -404,6 +421,8 @@ int memx_touch_attach(int screen_w, int screen_h, int orientation)
 
 	fd = lk.devt ? memx_find_fd(lk.devt) : -1;
 	if (fd < 0) {
+		pr_info("memx_touch: evdev devt=%u caller has no matching fd (inject only)\n",
+			lk.devt);
 		mutex_unlock(&g_tlock);
 		return 0;
 	}
