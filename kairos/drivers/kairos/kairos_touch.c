@@ -55,6 +55,7 @@ static DEFINE_MUTEX(g_tlock);
 
 static int	g_screen_w;
 static int	g_screen_h;
+static int	g_orient;		/* 0/1/2/3 == Surface.ROTATION_0/90/180/270 */
 static int	g_hw_min_x, g_hw_max_x;
 static int	g_hw_min_y, g_hw_max_y;
 
@@ -208,9 +209,87 @@ static void kairos_emit(unsigned int type, unsigned int code, int value)
 	kairos_queue_event(type, code, value);
 }
 
+/* 有 ABS_MT_PRESSURE 轴就打满：否则 InputReader 可能把这一指判成 hover，
+ * 事件到了 evdev 但上层应用（尤其游戏）根本不响应。 */
+static void kairos_emit_pressure(void)
+{
+	int max;
+
+	if (!g_tdev)
+		return;
+	max = input_abs_get_max(g_tdev, ABS_MT_PRESSURE);
+	if (max > 0)
+		kairos_emit(EV_ABS, ABS_MT_PRESSURE, max);
+}
+
+static void kairos_emit_pressure_zero(void)
+{
+	if (g_tdev && input_abs_get_max(g_tdev, ABS_MT_PRESSURE) > 0)
+		kairos_emit(EV_ABS, ABS_MT_PRESSURE, 0);
+}
+
 /* ================================================================== */
 /* 坐标映射                                                            */
 /* ================================================================== */
+/*
+ * 逻辑屏坐标 -> 触摸屏自然坐标。
+ *
+ * 触摸屏的 ABS 量程定义在**面板自然方向**上（这台机器是竖屏：X=1904*10, Y=3040*10），
+ * 而客户端给的是**旋转后**的逻辑坐标（横屏 3040x1904），所以必须按 orientation
+ * 做一次旋转/镜像，再线性映射进 ABS 量程。
+ *
+ * 实测（orientation=1，ROT_90）：
+ *     lx = ABS_Y / 10
+ *     ly = 1904 - ABS_X / 10
+ *   => 自然系  nx = H - ly , ny = lx
+ */
+static int kairos_scale(int v, int src_max, int hw_min, int hw_max);
+
+static void kairos_map_point(int x, int y, int *ax, int *ay)
+{
+	int nx, ny, nw, nh;
+
+	switch (g_orient & 3) {
+	case 1:			/* ROT_90 */
+		nx = g_screen_h - y;
+		ny = x;
+		nw = g_screen_h;	/* 自然宽度 == 逻辑高度 */
+		nh = g_screen_w;
+		break;
+	case 3:			/* ROT_270 */
+		nx = y;
+		ny = g_screen_w - x;
+		nw = g_screen_h;
+		nh = g_screen_w;
+		break;
+	case 2:			/* ROT_180 */
+		nx = g_screen_w - x;
+		ny = g_screen_h - y;
+		nw = g_screen_w;
+		nh = g_screen_h;
+		break;
+	default:		/* ROT_0 */
+		nx = x;
+		ny = y;
+		nw = g_screen_w;
+		nh = g_screen_h;
+		break;
+	}
+
+	*ax = kairos_scale(nx, nw, g_hw_min_x, g_hw_max_x);
+	*ay = kairos_scale(ny, nh, g_hw_min_y, g_hw_max_y);
+}
+
+/* 让 (screen_w, screen_h) 与客户端一致：旋转时保证是“横屏”语义 */
+static void kairos_normalize_dims(void)
+{
+	if ((g_orient & 1) && g_screen_w < g_screen_h) {
+		int t = g_screen_w;
+		g_screen_w = g_screen_h;
+		g_screen_h = t;
+	}
+}
+
 static int kairos_scale(int v, int src_max, int hw_min, int hw_max)
 {
 	if (src_max <= 0 || hw_max <= hw_min)
@@ -272,7 +351,7 @@ int kairos_touch_attach(int screen_w, int screen_h, int orientation)
 
 	g_screen_w = screen_w;
 	g_screen_h = screen_h;
-	(void)orientation;
+	g_orient = orientation & 3;
 
 	class_for_each_device(&input_class, NULL, &dev, kairos_touch_match);
 	if (!dev) {
@@ -286,6 +365,27 @@ int kairos_touch_attach(int screen_w, int screen_h, int orientation)
 	g_hw_max_x = input_abs_get_max(dev, ABS_MT_POSITION_X);
 	g_hw_min_y = input_abs_get_min(dev, ABS_MT_POSITION_Y);
 	g_hw_max_y = input_abs_get_max(dev, ABS_MT_POSITION_Y);
+
+	/*
+	 * 兜底：调用方把 orientation 传 0（或没传），但面板自然方向与逻辑方向
+	 * 的纵横比不一致 —— 说明画面其实是转过的，按 90° 处理，
+	 * 否则整块触摸会转置（正中点还能对上，越靠边错得越多）。
+	 */
+	{
+		int span_x = g_hw_max_x - g_hw_min_x;
+		int span_y = g_hw_max_y - g_hw_min_y;
+
+		if ((g_orient & 3) == 0 && span_x > 0 && span_y > 0 &&
+		    ((span_x > span_y) != (g_screen_w > g_screen_h)))
+			g_orient = 1;
+	}
+
+	kairos_normalize_dims();
+
+	pr_info("kairos_touch: dev=%s abs_x=[%d,%d] abs_y=[%d,%d] screen=%dx%d orient=%d\n",
+		dev->name ? dev->name : "?",
+		g_hw_min_x, g_hw_max_x, g_hw_min_y, g_hw_max_y,
+		g_screen_w, g_screen_h, g_orient);
 
 	memset(g_slot_down, 0, sizeof(g_slot_down));
 	memset(g_slot_tid, 0, sizeof(g_slot_tid));
@@ -340,8 +440,7 @@ int kairos_touch_down(int slot, int x, int y)
 		return -ENODEV;
 	}
 
-	hx = kairos_scale(x, g_screen_w, g_hw_min_x, g_hw_max_x);
-	hy = kairos_scale(y, g_screen_h, g_hw_min_y, g_hw_max_y);
+	kairos_map_point(x, y, &hx, &hy);
 
 	if (!g_slot_down[slot]) {
 		g_slot_down[slot] = true;
@@ -352,6 +451,7 @@ int kairos_touch_down(int slot, int x, int y)
 	kairos_emit(EV_ABS, ABS_MT_TRACKING_ID, (int)g_slot_tid[slot]);
 	kairos_emit(EV_ABS, ABS_MT_POSITION_X, hx);
 	kairos_emit(EV_ABS, ABS_MT_POSITION_Y, hy);
+	kairos_emit_pressure();
 	kairos_emit(EV_KEY, BTN_TOUCH, 1);
 	kairos_emit(EV_SYN, SYN_REPORT, 0);
 
@@ -376,12 +476,12 @@ int kairos_touch_move(int slot, int x, int y)
 		return -EINVAL;
 	}
 
-	hx = kairos_scale(x, g_screen_w, g_hw_min_x, g_hw_max_x);
-	hy = kairos_scale(y, g_screen_h, g_hw_min_y, g_hw_max_y);
+	kairos_map_point(x, y, &hx, &hy);
 
 	kairos_emit(EV_ABS, ABS_MT_SLOT, slot);
 	kairos_emit(EV_ABS, ABS_MT_POSITION_X, hx);
 	kairos_emit(EV_ABS, ABS_MT_POSITION_Y, hy);
+	kairos_emit_pressure();
 	kairos_emit(EV_SYN, SYN_REPORT, 0);
 
 	mutex_unlock(&g_tlock);
@@ -411,8 +511,10 @@ int kairos_touch_up(int slot)
 		if (g_slot_down[i])
 			remain++;
 
-	if (!remain)
+	if (!remain) {
+		kairos_emit_pressure_zero();
 		kairos_emit(EV_KEY, BTN_TOUCH, 0);
+	}
 
 	kairos_emit(EV_SYN, SYN_REPORT, 0);
 
