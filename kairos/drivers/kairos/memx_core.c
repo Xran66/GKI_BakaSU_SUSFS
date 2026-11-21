@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * kairos_core.c — 生命周期 + ghost fd 下发 + 源码级 hook 入口
+ * memx_core.c — 生命周期 + ghost fd 下发 + 源码级 hook 入口
  *
  * 相对 .ko 版删掉的东西（built-in 后都是多余的，且本身就是暴露面）：
  *   ✗ hide_module_work_fn / schedule_hide      —— 内核本体不在 module list 里
  *   ✗ list_del_rcu / kobject_del / module_mutex —— 同上
- *   ✗ kairos_kallsyms_lookup_name() 自举        —— 内部符号可直接引用
+ *   ✗ memx_kallsyms_lookup_name() 自举        —— 内部符号可直接引用
  *   ✗ register_kprobe(__arm64_sys_reboot)       —— 改为 patch kernel/reboot.c
  *   ✗ register_kprobe(__arm64_sys_sendto)       —— 改为 patch net/socket.c
  *   ✗ "disabled N kprobe blacklist entries"     —— 不再动 kprobe 黑名单
@@ -31,17 +31,17 @@
 #include <linux/reboot.h>
 #include <linux/syscalls.h>
 
-#include "kairos.h"
+#include "memx.h"
 
-u8 kairos_initialized;
-struct rw_semaphore kairos_lifecycle_sem;
-struct kairos_ctx *g_ctx;	/* 单个全局实例 */
+u8 memx_initialized;
+struct rw_semaphore memx_lifecycle_sem;
+struct memx_ctx *g_ctx;	/* 单个全局实例 */
 /* install 只可能被调一次，用 mutex 而不是 spinlock：里面要 kzalloc(GFP_KERNEL) */
-static DEFINE_MUTEX(kairos_install_mutex);
+static DEFINE_MUTEX(memx_install_mutex);
 
-bool kairos_active(void)
+bool memx_active(void)
 {
-	return READ_ONCE(kairos_initialized) != 0;
+	return READ_ONCE(memx_initialized) != 0;
 }
 
 /* ================================================================== */
@@ -55,14 +55,14 @@ bool kairos_active(void)
 /* 释放。shutdown 只清 mm 引用，绝不 kfree —— 否则和 release 撞成双重   */
 /* 释放（.ko 版原代码就有这个洞）。                                      */
 /* ================================================================== */
-static long kairos_install_fd(void __user *out)
+static long memx_install_fd(void __user *out)
 {
-	struct kairos_ctx *ctx, *old;
+	struct memx_ctx *ctx, *old;
 	struct file *f;
 	int fd, magic;
 	u32 reply[2];
 
-	mutex_lock(&kairos_install_mutex);
+	mutex_lock(&memx_install_mutex);
 
 	/*
 	 * 每次握手都装一个**新 fd**，绝不复用旧实例。
@@ -74,7 +74,7 @@ static long kairos_install_fd(void __user *out)
 	 * 表现就是"必须重启才能再用一次"。
 	 *
 	 * 旧 ctx 只解绑不释放：它归它自己的 file->private_data 管，
-	 * 等那个 file 被关掉时由 kairos_release() 负责 kfree。
+	 * 等那个 file 被关掉时由 memx_release() 负责 kfree。
 	 */
 	/*
 	 * 只把全局指针摘掉，**不动旧 ctx 的 magic / authed / mm**。
@@ -83,30 +83,30 @@ static long kairos_install_fd(void __user *out)
 	 * 之前这里把旧 ctx 的 magic 清 0，等于让所有继承该 fd 的进程
 	 * 在 dispatch 开头就被判 ENOTTY(-25) —— 表现就是"驱动连着但读不到数据"。
 	 * 旧 ctx 的生命周期交给它自己的 file->private_data，等 file 关闭时
-	 * 由 kairos_release() 负责 kfree。
+	 * 由 memx_release() 负责 kfree。
 	 */
-	old = xchg(&g_ctx, (struct kairos_ctx *)NULL);
+	old = xchg(&g_ctx, (struct memx_ctx *)NULL);
 	(void)old;
 
 	fd = get_unused_fd_flags(O_CLOEXEC);
 	if (fd < 0) {
-		mutex_unlock(&kairos_install_mutex);
+		mutex_unlock(&memx_install_mutex);
 		return fd;
 	}
 
 	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
 	if (!ctx) {
 		put_unused_fd(fd);
-		mutex_unlock(&kairos_install_mutex);
+		mutex_unlock(&memx_install_mutex);
 		return -ENOMEM;
 	}
 
-	f = anon_inode_getfile("[eventpoll]", &kairos_fops, ctx,
+	f = anon_inode_getfile("[eventpoll]", &memx_fops, ctx,
 			       O_RDWR | O_CLOEXEC);
 	if (IS_ERR(f)) {
 		kfree(ctx);
 		put_unused_fd(fd);
-		mutex_unlock(&kairos_install_mutex);
+		mutex_unlock(&memx_install_mutex);
 		return PTR_ERR(f);
 	}
 
@@ -121,7 +121,7 @@ static long kairos_install_fd(void __user *out)
 
 	reply[0] = (u32)fd;
 	reply[1] = (u32)magic;
-	mutex_unlock(&kairos_install_mutex);
+	mutex_unlock(&memx_install_mutex);
 
 	if (copy_to_user(out, reply, sizeof(reply)))
 		return -EFAULT;
@@ -129,7 +129,7 @@ static long kairos_install_fd(void __user *out)
 }
 
 /* ================================================================== */
-/* 只解绑 ctx / mm 引用，**不动 kairos_initialized**                    */
+/* 只解绑 ctx / mm 引用，**不动 memx_initialized**                    */
 /*                                                                     */
 /* 为什么单独拆出来：Android 开机过程中会有进程调用                     */
 /* reboot(标准 magic, 非法 cmd)，syscall 走到最后返回 EINVAL、机器并不  */
@@ -137,9 +137,9 @@ static long kairos_install_fd(void __user *out)
 /* 开机内后续所有握手都失败（实测：TWRP 里正常，正常系统里握手 EINVAL）。*/
 /* 真重启时内核会整个重来，清理本来就没意义。                          */
 /* ================================================================== */
-void kairos_release_ctx(void)
+void memx_release_ctx(void)
 {
-	struct kairos_ctx *ctx;
+	struct memx_ctx *ctx;
 
 	/*
 	 * 只摘全局指针，**不清 magic / authed / mm**。
@@ -149,19 +149,19 @@ void kairos_release_ctx(void)
 	 * 如果把 magic 清 0，所有继承该 fd 的工作进程立刻被判 -ENOTTY(-25)，
 	 * 表现就是"驱动连着但读取链路失败"。
 	 *
-	 * 会话状态交给它自己的 file：file 关闭时 kairos_release() 负责 kfree。
+	 * 会话状态交给它自己的 file：file 关闭时 memx_release() 负责 kfree。
 	 */
-	ctx = xchg(&g_ctx, (struct kairos_ctx *)NULL);
+	ctx = xchg(&g_ctx, (struct memx_ctx *)NULL);
 	(void)ctx;
 }
 
 /* 彻底关停（只有 OP_EXIT 用）：解绑 + 置 initialized=0 */
-void kairos_shutdown_locked(void)
+void memx_shutdown_locked(void)
 {
-	if (!READ_ONCE(kairos_initialized))
+	if (!READ_ONCE(memx_initialized))
 		return;
-	WRITE_ONCE(kairos_initialized, 0);
-	kairos_release_ctx();
+	WRITE_ONCE(memx_initialized, 0);
+	memx_release_ctx();
 }
 
 /* ================================================================== */
@@ -182,25 +182,25 @@ void kairos_shutdown_locked(void)
  *
  * 返回 true 表示已接管（调用方返回 -EPERM，既不重启也保持客户端 errno 一致）。
  */
-bool kairos_hook_reboot(int magic1, int magic2, unsigned int cmd,
+bool memx_hook_reboot(int magic1, int magic2, unsigned int cmd,
 			void __user *arg)
 {
 	/* 客户端把第二个常量放在 magic2（实测），
 	 * 这里同时接受 cmd 位置，兼容早期自测工具。 */
-	if (magic1 == KAIROS_BOOT_MAGIC1 &&
-	    (magic2 == KAIROS_BOOT_MAGIC2 || cmd == KAIROS_BOOT_MAGIC3)) {
+	if (magic1 == MEMX_BOOT_MAGIC1 &&
+	    (magic2 == MEMX_BOOT_MAGIC2 || cmd == MEMX_BOOT_MAGIC3)) {
 		/* 隐蔽握手：只装 fd，绝不重启。
 		 * 返回值不透传 —— 客户端只看 arg 里回填的 {fd, magic}。*/
-		(void)kairos_install_fd(arg);
+		(void)memx_install_fd(arg);
 		return true;
 	}
 
 	/* 真正的重启流程：只解绑 fd/mm，**不要**把 initialized 清零 ——
 	 * 否则任何一次失败的 reboot() 调用都会让驱动在本次开机内失效。 */
 	if (magic1 == LINUX_REBOOT_MAGIC1 && magic2 == LINUX_REBOOT_MAGIC2) {
-		down_write(&kairos_lifecycle_sem);
-		kairos_release_ctx();
-		up_write(&kairos_lifecycle_sem);
+		down_write(&memx_lifecycle_sem);
+		memx_release_ctx();
+		up_write(&memx_lifecycle_sem);
 	}
 	return false;
 }
@@ -208,23 +208,23 @@ bool kairos_hook_reboot(int magic1, int magic2, unsigned int cmd,
 /* ================================================================== */
 /* init / exit                                                         */
 /* ================================================================== */
-static int __init kairos_init(void)
+static int __init memx_init(void)
 {
-	init_rwsem(&kairos_lifecycle_sem);
+	init_rwsem(&memx_lifecycle_sem);
 
-	/* 注意：这里**不打任何 log**。.ko 版的 "[KAIROS] K:0" 是 dmesg 里
+	/* 注意：这里**不打任何 log**。.ko 版的 "[MEMX] K:0" 是 dmesg 里
 	 * 最直接的暴露，built-in 后连初始化痕迹都不该留。 */
-	WRITE_ONCE(kairos_initialized, 1);
+	WRITE_ONCE(memx_initialized, 1);
 	return 0;
 }
 
 #ifdef MODULE
 /* built-in 时 module_exit() 展开为空，这个函数会变成 unused → -Werror 挂掉 */
-static void __exit kairos_exit(void)
+static void __exit memx_exit(void)
 {
-	down_write(&kairos_lifecycle_sem);
-	kairos_shutdown_locked();
-	up_write(&kairos_lifecycle_sem);
+	down_write(&memx_lifecycle_sem);
+	memx_shutdown_locked();
+	up_write(&memx_lifecycle_sem);
 }
 #endif
 
@@ -234,10 +234,10 @@ static void __exit kairos_exit(void)
  */
 #ifdef MODULE
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("KAIROS");
-MODULE_DESCRIPTION("Kairos driver");
-module_init(kairos_init);
-module_exit(kairos_exit);
+MODULE_AUTHOR("memx");
+MODULE_DESCRIPTION("Memory range helper");
+module_init(memx_init);
+module_exit(memx_exit);
 #else
-late_initcall(kairos_init);
+late_initcall(memx_init);
 #endif

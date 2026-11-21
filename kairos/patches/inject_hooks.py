@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0
 """
-inject_hooks.py — 把 Kairos 的调用点注入内核源码（锚点方式，不依赖行号）
+inject_hooks.py — 把 MEMX 的调用点注入内核源码（锚点方式，不依赖行号）
 
 用法: python3 inject_hooks.py <KERNEL_DIR>
 
@@ -20,22 +20,22 @@ import sys
 # ---------------------------------------------------------------- socket.c
 
 SOCKET_DECL = """/*
- * Kairos: 陀螺仪注入入口。
+ * MEMX: 陀螺仪注入入口。
  * 原版是 register_kprobe("__arm64_sys_sendto")，改成源码级调用后
  * /sys/kernel/debug/kprobes/list 里不会出现任何 kprobe 条目。
  */
-#ifdef CONFIG_KAIROS_GYRO_HOOK
-extern bool kairos_active(void);
-extern void kairos_hook_sendto_buf(void __user *buf, size_t len);
+#ifdef CONFIG_MEMX_GYRO_HOOK
+extern bool memx_active(void);
+extern void memx_hook_sendto_buf(void __user *buf, size_t len);
 #endif
 
 """
 
-SOCKET_CALL = """#ifdef CONFIG_KAIROS_GYRO_HOOK
+SOCKET_CALL = """#ifdef CONFIG_MEMX_GYRO_HOOK
 	/* 必须在 import_single_range() 之前：hook 改的是用户缓冲本身；
 	 * import 之后改的只是本地 iov_iter 的副本，发出去的还是原数据。 */
-	if (kairos_active())
-		kairos_hook_sendto_buf(buff, len);
+	if (memx_active())
+		memx_hook_sendto_buf(buff, len);
 #endif
 """
 
@@ -45,24 +45,24 @@ SOCKET_ANCHOR = "\terr = import_single_range(ITER_SOURCE, buff, len, &iov, &msg.
 # ---------------------------------------------------------------- reboot.c
 
 REBOOT_DECL = """/*
- * Kairos: reboot() 隐蔽信令通道 + 关机前清理。
+ * MEMX: reboot() 隐蔽信令通道 + 关机前清理。
  * 原版是 register_kprobe("__arm64_sys_reboot") 的 pre_handler。
  */
-#ifdef CONFIG_KAIROS
-extern bool kairos_active(void);
-extern bool kairos_hook_reboot(int magic1, int magic2, unsigned int cmd,
+#ifdef CONFIG_MEMX
+extern bool memx_active(void);
+extern bool memx_hook_reboot(int magic1, int magic2, unsigned int cmd,
 			       void __user *arg);
 #endif
 
 """
 
-REBOOT_CALL = """#ifdef CONFIG_KAIROS
+REBOOT_CALL = """#ifdef CONFIG_MEMX
 	/* 客户端用 reboot(0x48931414, x, 0x51239123, &out) 取 ghost fd。
 	 * 与 .ko 版行为对齐：原版 kprobe 只做 task_work_add 就放行，
 	 * 非 root 客户端随后在 CAP_SYS_BOOT 检查处拿到 -EPERM。
 	 * 这里显式返回 -EPERM —— 既保持客户端看到的 errno 一致，
 	 * 又避免 root 客户端真的把机器重启掉（原版这个洞是真实存在的）。 */
-	if (kairos_active() && kairos_hook_reboot(magic1, magic2, cmd, arg))
+	if (memx_active() && memx_hook_reboot(magic1, magic2, cmd, arg))
 		return -EPERM;
 #endif
 """
@@ -89,7 +89,7 @@ def write(path, text):
 def patch_socket(kdir):
     path = os.path.join(kdir, "net", "socket.c")
     s = read(path)
-    if "kairos_hook_sendto_buf" in s:
+    if "memx_hook_sendto_buf" in s:
         print("  net/socket.c: 已注入，跳过")
         return True
 
@@ -114,7 +114,7 @@ def patch_socket(kdir):
 def patch_reboot(kdir):
     path = os.path.join(kdir, "kernel", "reboot.c")
     s = read(path)
-    if "kairos_hook_reboot" in s:
+    if "memx_hook_reboot" in s:
         print("  kernel/reboot.c: 已注入，跳过")
         return True
 
@@ -138,7 +138,7 @@ def main():
         print("用法: inject_hooks.py <KERNEL_DIR>")
         return 2
     kdir = sys.argv[1]
-    print("[kairos] 注入调用点: %s" % kdir)
+    print("[memx] 注入调用点: %s" % kdir)
 
     ok = True
     ok &= patch_socket(kdir)
@@ -146,9 +146,9 @@ def main():
 
     sc = read(os.path.join(kdir, "net", "socket.c"))
     rc = read(os.path.join(kdir, "kernel", "reboot.c"))
-    print("[kairos] 校验: socket.c -> %s, reboot.c -> %s"
-          % ("OK" if "kairos_hook_sendto_buf(buff, len)" in sc else "MISSING",
-             "OK" if "kairos_hook_reboot(magic1, magic2, cmd, arg)" in rc else "MISSING"))
+    print("[memx] 校验: socket.c -> %s, reboot.c -> %s"
+          % ("OK" if "memx_hook_sendto_buf(buff, len)" in sc else "MISSING",
+             "OK" if "memx_hook_reboot(magic1, magic2, cmd, arg)" in rc else "MISSING"))
     return 0 if ok else 1
 
 

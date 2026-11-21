@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * kairos_auth.c — 设备绑定认证（从 _xd3f96adb... @0x9358 + _x41bbebc... @0x9260 转写）
+ * memx_auth.c — 设备绑定认证（从 _xd3f96adb... @0x9358 + _x41bbebc... @0x9260 转写）
  *
  * ── 它到底在干嘛 ──────────────────────────────────────────────
  * 不是"密码校验"，是**设备指纹绑定**：
@@ -26,10 +26,10 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 
-#include "kairos.h"
+#include "memx.h"
 
 /* 原版 read_and_clean_file()：读到缓冲区并去掉尾部空白/换行 */
-static int kairos_read_clean(const char *path, char *buf, size_t bufsz)
+static int memx_read_clean(const char *path, char *buf, size_t bufsz)
 {
 	struct file *f;
 	loff_t pos = 0;
@@ -66,12 +66,12 @@ static int kairos_read_clean(const char *path, char *buf, size_t bufsz)
 }
 
 /* 原版 14 个路径，前 6 个要求 len > 15，后 8 个要求 len > 7 */
-struct kairos_sn_src {
+struct memx_sn_src {
 	const char	*path;
 	unsigned int	min_len;
 };
 
-static const struct kairos_sn_src kairos_sn_srcs[] = {
+static const struct memx_sn_src memx_sn_srcs[] = {
 	{ "/sys/block/mmcblk0/device/cid", 15 },
 	{ "/sys/class/mmc_host/mmc0/mmc0:0001/cid", 15 },
 	{ "/sys/bus/mmc/devices/mmc0:0001/cid", 15 },
@@ -88,14 +88,14 @@ static const struct kairos_sn_src kairos_sn_srcs[] = {
 	{ "/proc/device-tree/chosen/serial-number", 7 },
 };
 
-int kairos_expected_key(char *out, size_t outsz)
+int memx_expected_key(char *out, size_t outsz)
 {
 	char sn[64];
 	int i, n;
 
-	for (i = 0; i < ARRAY_SIZE(kairos_sn_srcs); i++) {
-		n = kairos_read_clean(kairos_sn_srcs[i].path, sn, sizeof(sn));
-		if (n > (int)kairos_sn_srcs[i].min_len)
+	for (i = 0; i < ARRAY_SIZE(memx_sn_srcs); i++) {
+		n = memx_read_clean(memx_sn_srcs[i].path, sn, sizeof(sn));
+		if (n > (int)memx_sn_srcs[i].min_len)
 			return snprintf(out, outsz, "DEV_%s_KEY", sn);
 	}
 
@@ -104,10 +104,10 @@ int kairos_expected_key(char *out, size_t outsz)
 }
 
 /* 标准 base64（原版 _x41bbebc... 就是教科书实现，含 '=' 填充） */
-static const char kairos_b64tab[] =
+static const char memx_b64tab[] =
 	"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-void kairos_base64(char *out, const u8 *in, int len)
+void memx_base64(char *out, const u8 *in, int len)
 {
 	int i = 0, o = 0;
 
@@ -119,10 +119,10 @@ void kairos_base64(char *out, const u8 *in, int len)
 		if (i + 2 < len)
 			v |= in[i + 2];
 
-		out[o++] = kairos_b64tab[(v >> 18) & 0x3F];
-		out[o++] = kairos_b64tab[(v >> 12) & 0x3F];
-		out[o++] = (i + 1 < len) ? kairos_b64tab[(v >> 6) & 0x3F] : '=';
-		out[o++] = (i + 2 < len) ? kairos_b64tab[v & 0x3F] : '=';
+		out[o++] = memx_b64tab[(v >> 18) & 0x3F];
+		out[o++] = memx_b64tab[(v >> 12) & 0x3F];
+		out[o++] = (i + 1 < len) ? memx_b64tab[(v >> 6) & 0x3F] : '=';
+		out[o++] = (i + 2 < len) ? memx_b64tab[v & 0x3F] : '=';
 		i += 3;
 	}
 	out[o] = 0;
@@ -133,20 +133,20 @@ void kairos_base64(char *out, const u8 *in, int len)
  * 注意原版有个坑：生成的 key 长度恰好 64 时会走 fortify_panic（strnlen 找不到 NUL），
  * 这里直接判掉并返回 -EINVAL，避免把机器搞挂。
  */
-int kairos_auth_check(const u8 *blob)
+int memx_auth_check(const u8 *blob)
 {
 	char expect[80], b64[128];
 	int n;
 
-	n = kairos_expected_key(expect, sizeof(expect));
+	n = memx_expected_key(expect, sizeof(expect));
 	if (n <= 0 || n >= 64)
 		return -EINVAL;
 
-	kairos_base64(b64, (const u8 *)expect, n);
+	memx_base64(b64, (const u8 *)expect, n);
 
-	/* 只比前 KAIROS_KEY_LEN(64) 字节：客户端只送 64 字节，
+	/* 只比前 MEMX_KEY_LEN(64) 字节：客户端只送 64 字节，
 	 * 原版用 sizeof(b64)=128 比会读越过用户缓冲末尾 */
-	if (strncmp((const char *)blob, b64, KAIROS_KEY_LEN))
+	if (strncmp((const char *)blob, b64, MEMX_KEY_LEN))
 		return -EACCES;
 
 	return 0;

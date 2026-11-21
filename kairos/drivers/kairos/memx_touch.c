@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * kairos_touch.c —— 触摸注入（0x809 / 0x810 / 0x811 / 0x812 / 0x814 / 0x817）
+ * memx_touch.c —— 触摸注入（0x809 / 0x810 / 0x811 / 0x812 / 0x814 / 0x817）
  *
  * 与原版一致的完整链路：
  *
@@ -42,13 +42,13 @@
 #include <linux/rcupdate.h>
 #include <linux/uaccess.h>
 
-#include "kairos.h"
+#include "memx.h"
 
 /* built-in 链接，不需要 EXPORT_SYMBOL */
 extern struct class input_class;
 
-#define KAIROS_TOUCH_SLOTS	10
-#define KAIROS_EVQ_MAX		32
+#define MEMX_TOUCH_SLOTS	10
+#define MEMX_EVQ_MAX		32
 
 static struct input_dev	*g_tdev;
 static DEFINE_MUTEX(g_tlock);
@@ -59,8 +59,8 @@ static int	g_orient;		/* 0/1/2/3 == Surface.ROTATION_0/90/180/270 */
 static int	g_hw_min_x, g_hw_max_x;
 static int	g_hw_min_y, g_hw_max_y;
 
-static bool	g_slot_down[KAIROS_TOUCH_SLOTS];
-static u32	g_slot_tid[KAIROS_TOUCH_SLOTS];
+static bool	g_slot_down[MEMX_TOUCH_SLOTS];
+static u32	g_slot_tid[MEMX_TOUCH_SLOTS];
 static u32	g_tid_counter;
 
 /* ---- fops 钩子 ---- */
@@ -71,13 +71,13 @@ static ssize_t (*g_old_read)(struct file *, char __user *, size_t, loff_t *);
 static __poll_t (*g_old_poll)(struct file *, struct poll_table_struct *);
 
 /* 送给客户端的事件队列 */
-static struct input_event	g_evq[KAIROS_EVQ_MAX];
+static struct input_event	g_evq[MEMX_EVQ_MAX];
 static int			g_evq_n;
 
 /* ================================================================== */
 /* 设备与 fd 定位                                                      */
 /* ================================================================== */
-static int kairos_touch_match(struct device *dev, void *data)
+static int memx_touch_match(struct device *dev, void *data)
 {
 	struct input_dev *idev = to_input_dev(dev);
 	struct input_dev **out = (struct input_dev **)data;
@@ -94,14 +94,14 @@ static int kairos_touch_match(struct device *dev, void *data)
 	return 1;
 }
 
-struct kairos_evdev_lookup {
+struct memx_evdev_lookup {
 	struct device	*parent;
 	dev_t		devt;
 };
 
-static int kairos_evdev_match(struct device *dev, void *data)
+static int memx_evdev_match(struct device *dev, void *data)
 {
-	struct kairos_evdev_lookup *l = data;
+	struct memx_evdev_lookup *l = data;
 
 	if (MAJOR(dev->devt) != INPUT_MAJOR)
 		return 0;
@@ -113,7 +113,7 @@ static int kairos_evdev_match(struct device *dev, void *data)
 }
 
 /* 在调用者自己的 fd 表里找指向 devt 的那个 fd */
-static int kairos_find_fd(dev_t devt)
+static int memx_find_fd(dev_t devt)
 {
 	struct files_struct *files = current->files;
 	struct fdtable *fdt;
@@ -147,7 +147,7 @@ static int kairos_find_fd(dev_t devt)
 /* ================================================================== */
 /* 被钩住的 read / poll                                                */
 /* ================================================================== */
-static ssize_t kairos_hooked_read(struct file *file, char __user *buf,
+static ssize_t memx_hooked_read(struct file *file, char __user *buf,
 				  size_t count, loff_t *ppos)
 {
 	size_t n;
@@ -177,7 +177,7 @@ static ssize_t kairos_hooked_read(struct file *file, char __user *buf,
 	return g_old_read ? g_old_read(file, buf, count, ppos) : -EINVAL;
 }
 
-static __poll_t kairos_hooked_poll(struct file *file, struct poll_table_struct *pt)
+static __poll_t memx_hooked_poll(struct file *file, struct poll_table_struct *pt)
 {
 	__poll_t ret = g_old_poll ? g_old_poll(file, pt) : 0;
 
@@ -188,9 +188,9 @@ static __poll_t kairos_hooked_poll(struct file *file, struct poll_table_struct *
 }
 
 /* 把事件同时投进队列，供客户端 read 取走 */
-static void kairos_queue_event(unsigned int type, unsigned int code, int value)
+static void memx_queue_event(unsigned int type, unsigned int code, int value)
 {
-	if (g_evq_n >= KAIROS_EVQ_MAX)
+	if (g_evq_n >= MEMX_EVQ_MAX)
 		return;
 
 	memset(&g_evq[g_evq_n], 0, sizeof(struct input_event));
@@ -200,18 +200,18 @@ static void kairos_queue_event(unsigned int type, unsigned int code, int value)
 	g_evq_n++;
 }
 
-static void kairos_emit(unsigned int type, unsigned int code, int value)
+static void memx_emit(unsigned int type, unsigned int code, int value)
 {
 	if (!g_tdev)
 		return;
 
 	input_event(g_tdev, type, code, value);
-	kairos_queue_event(type, code, value);
+	memx_queue_event(type, code, value);
 }
 
 /* 有 ABS_MT_PRESSURE 轴就打满：否则 InputReader 可能把这一指判成 hover，
  * 事件到了 evdev 但上层应用（尤其游戏）根本不响应。 */
-static void kairos_emit_pressure(void)
+static void memx_emit_pressure(void)
 {
 	int max;
 
@@ -219,13 +219,13 @@ static void kairos_emit_pressure(void)
 		return;
 	max = input_abs_get_max(g_tdev, ABS_MT_PRESSURE);
 	if (max > 0)
-		kairos_emit(EV_ABS, ABS_MT_PRESSURE, max);
+		memx_emit(EV_ABS, ABS_MT_PRESSURE, max);
 }
 
-static void kairos_emit_pressure_zero(void)
+static void memx_emit_pressure_zero(void)
 {
 	if (g_tdev && input_abs_get_max(g_tdev, ABS_MT_PRESSURE) > 0)
-		kairos_emit(EV_ABS, ABS_MT_PRESSURE, 0);
+		memx_emit(EV_ABS, ABS_MT_PRESSURE, 0);
 }
 
 /* ================================================================== */
@@ -243,9 +243,9 @@ static void kairos_emit_pressure_zero(void)
  *     ly = 1904 - ABS_X / 10
  *   => 自然系  nx = H - ly , ny = lx
  */
-static int kairos_scale(int v, int src_max, int hw_min, int hw_max);
+static int memx_scale(int v, int src_max, int hw_min, int hw_max);
 
-static void kairos_map_point(int x, int y, int *ax, int *ay)
+static void memx_map_point(int x, int y, int *ax, int *ay)
 {
 	int nx, ny, nw, nh;
 
@@ -276,12 +276,12 @@ static void kairos_map_point(int x, int y, int *ax, int *ay)
 		break;
 	}
 
-	*ax = kairos_scale(nx, nw, g_hw_min_x, g_hw_max_x);
-	*ay = kairos_scale(ny, nh, g_hw_min_y, g_hw_max_y);
+	*ax = memx_scale(nx, nw, g_hw_min_x, g_hw_max_x);
+	*ay = memx_scale(ny, nh, g_hw_min_y, g_hw_max_y);
 }
 
 /* 让 (screen_w, screen_h) 与客户端一致：旋转时保证是“横屏”语义 */
-static void kairos_normalize_dims(void)
+static void memx_normalize_dims(void)
 {
 	if ((g_orient & 1) && g_screen_w < g_screen_h) {
 		int t = g_screen_w;
@@ -290,7 +290,7 @@ static void kairos_normalize_dims(void)
 	}
 }
 
-static int kairos_scale(int v, int src_max, int hw_min, int hw_max)
+static int memx_scale(int v, int src_max, int hw_min, int hw_max)
 {
 	if (src_max <= 0 || hw_max <= hw_min)
 		return v;
@@ -304,12 +304,12 @@ static int kairos_scale(int v, int src_max, int hw_min, int hw_max)
 /* ================================================================== */
 /* attach / detach                                                     */
 /* ================================================================== */
-static void kairos_touch_unhook_locked(void)
+static void memx_touch_unhook_locked(void)
 {
 	int i;
 
 	if (g_tdev) {
-		for (i = 0; i < KAIROS_TOUCH_SLOTS; i++) {
+		for (i = 0; i < MEMX_TOUCH_SLOTS; i++) {
 			if (!g_slot_down[i])
 				continue;
 			input_event(g_tdev, EV_ABS, ABS_MT_SLOT, i);
@@ -337,23 +337,23 @@ static void kairos_touch_unhook_locked(void)
 	g_old_poll = NULL;
 }
 
-int kairos_touch_attach(int screen_w, int screen_h, int orientation)
+int memx_touch_attach(int screen_w, int screen_h, int orientation)
 {
 	struct input_dev *dev = NULL;
-	struct kairos_evdev_lookup lk;
+	struct memx_evdev_lookup lk;
 	struct file *fp;
 	int fd;
 
 	mutex_lock(&g_tlock);
 
 	if (g_tdev || g_hooked_file)
-		kairos_touch_unhook_locked();
+		memx_touch_unhook_locked();
 
 	g_screen_w = screen_w;
 	g_screen_h = screen_h;
 	g_orient = orientation & 3;
 
-	class_for_each_device(&input_class, NULL, &dev, kairos_touch_match);
+	class_for_each_device(&input_class, NULL, &dev, memx_touch_match);
 	if (!dev) {
 		mutex_unlock(&g_tlock);
 		return -ENODEV;
@@ -380,12 +380,14 @@ int kairos_touch_attach(int screen_w, int screen_h, int orientation)
 			g_orient = 1;
 	}
 
-	kairos_normalize_dims();
+	memx_normalize_dims();
 
-	pr_info("kairos_touch: dev=%s abs_x=[%d,%d] abs_y=[%d,%d] screen=%dx%d orient=%d\n",
+#ifdef MEMX_VERBOSE
+	pr_info("memx_touch: dev=%s abs_x=[%d,%d] abs_y=[%d,%d] screen=%dx%d orient=%d\n",
 		dev->name ? dev->name : "?",
 		g_hw_min_x, g_hw_max_x, g_hw_min_y, g_hw_max_y,
 		g_screen_w, g_screen_h, g_orient);
+#endif
 
 	memset(g_slot_down, 0, sizeof(g_slot_down));
 	memset(g_slot_tid, 0, sizeof(g_slot_tid));
@@ -398,9 +400,9 @@ int kairos_touch_attach(int screen_w, int screen_h, int orientation)
 	 */
 	lk.parent = &dev->dev;
 	lk.devt = 0;
-	class_for_each_device(&input_class, NULL, &lk, kairos_evdev_match);
+	class_for_each_device(&input_class, NULL, &lk, memx_evdev_match);
 
-	fd = lk.devt ? kairos_find_fd(lk.devt) : -1;
+	fd = lk.devt ? memx_find_fd(lk.devt) : -1;
 	if (fd < 0) {
 		mutex_unlock(&g_tlock);
 		return 0;
@@ -417,8 +419,8 @@ int kairos_touch_attach(int screen_w, int screen_h, int orientation)
 	memcpy(&g_hooked_fops, g_orig_fop, sizeof(g_hooked_fops));
 	g_old_read = g_hooked_fops.read;
 	g_old_poll = g_hooked_fops.poll;
-	g_hooked_fops.read = kairos_hooked_read;
-	g_hooked_fops.poll = kairos_hooked_poll;
+	g_hooked_fops.read = memx_hooked_read;
+	g_hooked_fops.poll = memx_hooked_poll;
 
 	WRITE_ONCE(fp->f_op, &g_hooked_fops);
 	g_hooked_file = fp;
@@ -427,11 +429,11 @@ int kairos_touch_attach(int screen_w, int screen_h, int orientation)
 	return 0;
 }
 
-int kairos_touch_down(int slot, int x, int y)
+int memx_touch_down(int slot, int x, int y)
 {
 	int hx, hy;
 
-	if (slot < 0 || slot >= KAIROS_TOUCH_SLOTS)
+	if (slot < 0 || slot >= MEMX_TOUCH_SLOTS)
 		return -EINVAL;
 
 	mutex_lock(&g_tlock);
@@ -440,30 +442,30 @@ int kairos_touch_down(int slot, int x, int y)
 		return -ENODEV;
 	}
 
-	kairos_map_point(x, y, &hx, &hy);
+	memx_map_point(x, y, &hx, &hy);
 
 	if (!g_slot_down[slot]) {
 		g_slot_down[slot] = true;
 		g_slot_tid[slot] = ++g_tid_counter;
 	}
 
-	kairos_emit(EV_ABS, ABS_MT_SLOT, slot);
-	kairos_emit(EV_ABS, ABS_MT_TRACKING_ID, (int)g_slot_tid[slot]);
-	kairos_emit(EV_ABS, ABS_MT_POSITION_X, hx);
-	kairos_emit(EV_ABS, ABS_MT_POSITION_Y, hy);
-	kairos_emit_pressure();
-	kairos_emit(EV_KEY, BTN_TOUCH, 1);
-	kairos_emit(EV_SYN, SYN_REPORT, 0);
+	memx_emit(EV_ABS, ABS_MT_SLOT, slot);
+	memx_emit(EV_ABS, ABS_MT_TRACKING_ID, (int)g_slot_tid[slot]);
+	memx_emit(EV_ABS, ABS_MT_POSITION_X, hx);
+	memx_emit(EV_ABS, ABS_MT_POSITION_Y, hy);
+	memx_emit_pressure();
+	memx_emit(EV_KEY, BTN_TOUCH, 1);
+	memx_emit(EV_SYN, SYN_REPORT, 0);
 
 	mutex_unlock(&g_tlock);
 	return 0;
 }
 
-int kairos_touch_move(int slot, int x, int y)
+int memx_touch_move(int slot, int x, int y)
 {
 	int hx, hy;
 
-	if (slot < 0 || slot >= KAIROS_TOUCH_SLOTS)
+	if (slot < 0 || slot >= MEMX_TOUCH_SLOTS)
 		return -EINVAL;
 
 	mutex_lock(&g_tlock);
@@ -476,23 +478,23 @@ int kairos_touch_move(int slot, int x, int y)
 		return -EINVAL;
 	}
 
-	kairos_map_point(x, y, &hx, &hy);
+	memx_map_point(x, y, &hx, &hy);
 
-	kairos_emit(EV_ABS, ABS_MT_SLOT, slot);
-	kairos_emit(EV_ABS, ABS_MT_POSITION_X, hx);
-	kairos_emit(EV_ABS, ABS_MT_POSITION_Y, hy);
-	kairos_emit_pressure();
-	kairos_emit(EV_SYN, SYN_REPORT, 0);
+	memx_emit(EV_ABS, ABS_MT_SLOT, slot);
+	memx_emit(EV_ABS, ABS_MT_POSITION_X, hx);
+	memx_emit(EV_ABS, ABS_MT_POSITION_Y, hy);
+	memx_emit_pressure();
+	memx_emit(EV_SYN, SYN_REPORT, 0);
 
 	mutex_unlock(&g_tlock);
 	return 0;
 }
 
-int kairos_touch_up(int slot)
+int memx_touch_up(int slot)
 {
 	int i, remain = 0;
 
-	if (slot < 0 || slot >= KAIROS_TOUCH_SLOTS)
+	if (slot < 0 || slot >= MEMX_TOUCH_SLOTS)
 		return -EINVAL;
 
 	mutex_lock(&g_tlock);
@@ -503,29 +505,29 @@ int kairos_touch_up(int slot)
 
 	if (g_slot_down[slot]) {
 		g_slot_down[slot] = false;
-		kairos_emit(EV_ABS, ABS_MT_SLOT, slot);
-		kairos_emit(EV_ABS, ABS_MT_TRACKING_ID, -1);
+		memx_emit(EV_ABS, ABS_MT_SLOT, slot);
+		memx_emit(EV_ABS, ABS_MT_TRACKING_ID, -1);
 	}
 
-	for (i = 0; i < KAIROS_TOUCH_SLOTS; i++)
+	for (i = 0; i < MEMX_TOUCH_SLOTS; i++)
 		if (g_slot_down[i])
 			remain++;
 
 	if (!remain) {
-		kairos_emit_pressure_zero();
-		kairos_emit(EV_KEY, BTN_TOUCH, 0);
+		memx_emit_pressure_zero();
+		memx_emit(EV_KEY, BTN_TOUCH, 0);
 	}
 
-	kairos_emit(EV_SYN, SYN_REPORT, 0);
+	memx_emit(EV_SYN, SYN_REPORT, 0);
 
 	mutex_unlock(&g_tlock);
 	return 0;
 }
 
-int kairos_touch_detach(void)
+int memx_touch_detach(void)
 {
 	mutex_lock(&g_tlock);
-	kairos_touch_unhook_locked();
+	memx_touch_unhook_locked();
 	mutex_unlock(&g_tlock);
 	return 0;
 }

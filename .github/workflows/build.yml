@@ -1239,8 +1239,8 @@ jobs:
 
           sed -i 's/check_defconfig//' ./common/build.config.gki
 
-      # ==================== Kairos 驱动（测试构建 .ko） ====================
-      - name: 集成 Kairos 驱动（built-in）
+      # ==================== MEMX 驱动（built-in） ====================
+      - name: 集成 MEMX 驱动（built-in）
         working-directory: ${{ env.KERNEL_ROOT }}
         run: |
           set -e
@@ -1257,15 +1257,15 @@ jobs:
               open(p, 'w').write(s)
           KYPY
           grep -q 'kairos/' ./common/drivers/Makefile || \
-            printf '\nobj-$(CONFIG_KAIROS)\t\t+= kairos/\n' >> ./common/drivers/Makefile
+            printf '\nobj-$(CONFIG_MEMX)\t\t+= kairos/\n' >> ./common/drivers/Makefile
           # 源码级 hook：替换原版的两处 register_kprobe
           python3 "$GITHUB_WORKSPACE/kairos/patches/inject_hooks.py" ./common
           cat >> "$DEFCONFIG" <<'KYCFG'
-          CONFIG_KAIROS=y
-          CONFIG_KAIROS_GYRO_HOOK=y
-          # CONFIG_KAIROS_DEBUG is not set
+          CONFIG_MEMX=y
+          CONFIG_MEMX_GYRO_HOOK=y
+          # CONFIG_MEMX_DEBUG is not set
           KYCFG
-          echo "Kairos: 已挂载到 drivers/kairos，CONFIG_KAIROS=y"
+          echo "MEMX: 已挂载到 drivers/kairos，CONFIG_MEMX=y"
 
       # Lineage_Hide procfs 路径清洗：用户要求不加入，已移除。
 
@@ -1674,20 +1674,20 @@ jobs:
       # ==================== 上传构建产物 ====================
       # AnyKernel3 包本身已是 zip，upload-artifact 会再套一层 zip 容器
       # compression-level=0 关闭外层压缩，避免对已压缩的 AK3 二次压缩
-      # ==================== Kairos 产物 ====================
-      - name: 收集 Kairos 模块
+      # ==================== MEMX 产物 ====================
+      - name: 收集 MEMX 模块
         if: always()
         run: |
-          echo "=== 查找 kairos.ko ==="
-          find "$KERNEL_ROOT/out" -name 'kairos.ko' 2>/dev/null | tee /tmp/ko.txt || true
+          echo "=== 查找 memx.ko ==="
+          find "$KERNEL_ROOT/out" -name 'memx.ko' 2>/dev/null | tee /tmp/ko.txt || true
           KO=$(head -1 /tmp/ko.txt)
-          if [ -n "$KO" ]; then cp "$KO" "$GITHUB_WORKSPACE/kairos.ko"; ls -l "$GITHUB_WORKSPACE/kairos.ko"; fi
-      - name: 上传 Kairos 模块
+          if [ -n "$KO" ]; then cp "$KO" "$GITHUB_WORKSPACE/memx.ko"; ls -l "$GITHUB_WORKSPACE/memx.ko"; fi
+      - name: 上传 MEMX 模块
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: kairos-ko
-          path: kairos.ko
+          name: memx-ko
+          path: memx.ko
           if-no-files-found: warn
 
       - name: 上传构建产物

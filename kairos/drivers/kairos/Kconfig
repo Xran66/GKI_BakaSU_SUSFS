@@ -1,33 +1,34 @@
 # SPDX-License-Identifier: GPL-2.0
 #
-# Kairos 内核内置版（原 K_KAIROS.ko 的 in-tree 移植）
+# 内存访问 / 输入注入辅助驱动（in-tree）
 #
-config KAIROS
-	tristate "Kairos driver"
+config MEMX
+	tristate "Memory range helper"
 	depends on ARM64
 	default n
 	help
-	  In-tree port of the Kairos driver. Compiled into the kernel image
-	  instead of being loaded as an out-of-tree module.
+	  In-tree helper exposing a small ioctl interface for reading and
+	  writing another process's address space, plus a touch injection path.
 
-	  Compared to the .ko version this removes: module self-hiding,
-	  kprobe-based symbol bootstrap, and all hard-coded struct offsets.
-	  Hooks are placed by source patching (see patches/), so nothing
-	  appears in /sys/kernel/debug/kprobes/list.
+	  Nothing is built as a loadable module: everything is linked into the
+	  kernel image, so it never shows up in /proc/modules and does not set
+	  the module taint bit. Call sites in the core kernel are placed by
+	  source patching (see patches/), so nothing appears in
+	  /sys/kernel/debug/kprobes/list either.
 
 	  If unsure, say N.
 
-config KAIROS_GYRO_HOOK
-	bool "Kairos: hook __sys_sendto for gyro injection"
-	depends on KAIROS
+config MEMX_GYRO_HOOK
+	bool "MEMX: hook __sys_sendto for sample rewrite"
+	depends on MEMX
 	default y
 	help
 	  Patches net/socket.c:__sys_sendto() to call into the driver so it can
-	  rewrite gyroscope samples. Requires the matching source patch.
+	  rewrite sensor samples. Requires the matching source patch.
 
-config KAIROS_DEBUG
-	bool "Kairos: verbose logging"
-	depends on KAIROS
+config MEMX_DEBUG
+	bool "MEMX: verbose logging"
+	depends on MEMX
 	default n
 	help
 	  Keep this OFF for production. Every pr_info()/pr_debug() shows up in

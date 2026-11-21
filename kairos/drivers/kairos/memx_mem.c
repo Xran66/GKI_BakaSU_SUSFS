@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * kairos_mem.c — 物理内存层（built-in 版）
+ * memx_mem.c — 物理内存层（built-in 版）
  *
  * 与 .ko 版相比的核心优化：
  *   1. **删掉全部硬编码偏移**：mm->pgd / mm->mmap_lock / task->mm / task->alloc_lock
@@ -25,7 +25,7 @@
 #include <linux/highmem.h>
 #include <linux/pgtable.h>
 
-#include "kairos.h"
+#include "memx.h"
 
 /*
  * swap_cache_get_folio() 在 6.6 里是 mm/swap_state.c 的全局函数，
@@ -43,7 +43,7 @@ struct folio *swap_cache_get_folio(swp_entry_t entry,
 /* ================================================================== */
 /* 1. 取 mm                                                            */
 /* ================================================================== */
-struct mm_struct *kairos_grab_mm_by_pid(pid_t pid)
+struct mm_struct *memx_grab_mm_by_pid(pid_t pid)
 {
 	struct task_struct *task;
 	struct mm_struct *mm = NULL;
@@ -74,14 +74,14 @@ out:
 /* 39-bit VA 下 p4d/pud 折叠，最终就是 3 次查表，和原版指令序列等价。    */
 /* 全部用 READ_ONCE 读取，配合 RCU 保证不撕裂。                        */
 /* ================================================================== */
-struct kairos_va_result {
+struct memx_va_result {
 	unsigned long	pa;
 	u64		*pte_slot;	/* 指回最后一层表项，调用方拷完复核 */
 	bool		block;		/* true = PMD 块映射(2MB) */
 };
 
-static bool kairos_va_to_pa(struct mm_struct *mm, unsigned long va,
-			    bool for_write, struct kairos_va_result *out)
+static bool memx_va_to_pa(struct mm_struct *mm, unsigned long va,
+			    bool for_write, struct memx_va_result *out)
 {
 	pgd_t *pgd;
 	p4d_t *p4d;
@@ -152,7 +152,7 @@ static bool kairos_va_to_pa(struct mm_struct *mm, unsigned long va,
  *      arm64 的块映射是 PMD_TYPE_SECT == 1。
  * 直接改用内核的 pmd_sect()/pmd_pfn()/pte_present()/pte_pfn() 最稳。
  */
-static bool kairos_pte_still_same(struct kairos_va_result *v)
+static bool memx_pte_still_same(struct memx_va_result *v)
 {
 	if (v->block) {
 		pmd_t now = READ_ONCE(*(pmd_t *)v->pte_slot);
@@ -182,7 +182,7 @@ static bool kairos_pte_still_same(struct kairos_va_result *v)
 /* built-in 后可以直接调用，但要注意：swap_info[] 是 static，永远引用不 */
 /* 到 —— 必须走 get_swap_device()（EXPORT_SYMBOL_GPL）。                */
 /* ================================================================== */
-static bool kairos_read_swap_page(swp_entry_t entry, void *dst,
+static bool memx_read_swap_page(swp_entry_t entry, void *dst,
 				  unsigned int off, size_t n)
 {
 	struct page *page;
@@ -265,7 +265,7 @@ static bool kairos_read_swap_page(swp_entry_t entry, void *dst,
  * 第 2 类原版也是直接放弃；这里用 GUP 触发一次缺页把它读进来，
  * 返回内容和 /proc/<pid>/mem 一致（零页），但不会让整次读取失败。
  */
-static unsigned long kairos_read_gup_page(struct mm_struct *mm, unsigned long va,
+static unsigned long memx_read_gup_page(struct mm_struct *mm, unsigned long va,
 					  void *dst, size_t n)
 {
 	struct page *page = NULL;
@@ -291,7 +291,7 @@ static unsigned long kairos_read_gup_page(struct mm_struct *mm, unsigned long va
 	return n;
 }
 
-unsigned long kairos_read_to_kbuf(struct mm_struct *mm, unsigned long va,
+unsigned long memx_read_to_kbuf(struct mm_struct *mm, unsigned long va,
 				  void *kbuf, unsigned long len)
 {
 	unsigned long done = 0;
@@ -299,12 +299,12 @@ unsigned long kairos_read_to_kbuf(struct mm_struct *mm, unsigned long va,
 	while (done < len) {
 		unsigned long page_off = (va + done) & ~PAGE_MASK;
 		size_t n = min_t(size_t, PAGE_SIZE - page_off, len - done);
-		struct kairos_va_result v;
+		struct memx_va_result v;
 		bool ok = false;
 
 		rcu_read_lock();
-		if (kairos_va_to_pa(mm, va + done, false, &v) &&
-		    kairos_pte_still_same(&v)) {
+		if (memx_va_to_pa(mm, va + done, false, &v) &&
+		    memx_pte_still_same(&v)) {
 			/* 注意：v.pa 里**已经带了页内偏移**（va & ~PAGE_MASK），
 			 * 这里不能再加 page_off，否则会读到 pa + 2*offset。 */
 			memcpy((char *)kbuf + done,
@@ -327,7 +327,7 @@ unsigned long kairos_read_to_kbuf(struct mm_struct *mm, unsigned long va,
 							swp_entry_t e = pte_to_swp_entry(*pte);
 
 							rcu_read_unlock();
-							if (!kairos_read_swap_page(e,
+							if (!memx_read_swap_page(e,
 								(char *)kbuf + done,
 								page_off, n))
 								goto out;
@@ -343,7 +343,7 @@ unsigned long kairos_read_to_kbuf(struct mm_struct *mm, unsigned long va,
 			/* 页表直读不可用（未缺页 / 特殊页）：GUP 兜底 */
 			unsigned long got;
 
-			got = kairos_read_gup_page(mm, va + done,
+			got = memx_read_gup_page(mm, va + done,
 						   (char *)kbuf + done, n);
 			if (!got)
 				break;
@@ -364,7 +364,7 @@ out:
 /*   若目标页被 fork 共享（mapcount > 1），改写会同步污染父/子进程。    */
 /*   这里默认走 GUP（走正规 COW），只有显式 fast=true 且确认独占才直写。*/
 /* ================================================================== */
-static unsigned long kairos_write_fast(struct mm_struct *mm, unsigned long va,
+static unsigned long memx_write_fast(struct mm_struct *mm, unsigned long va,
 				       const void *kbuf, unsigned long len)
 {
 	unsigned long done = 0;
@@ -372,12 +372,12 @@ static unsigned long kairos_write_fast(struct mm_struct *mm, unsigned long va,
 	while (done < len) {
 		unsigned long page_off = (va + done) & ~PAGE_MASK;
 		size_t n = min_t(size_t, PAGE_SIZE - page_off, len - done);
-		struct kairos_va_result v;
+		struct memx_va_result v;
 		struct page *page;
 
 		rcu_read_lock();
-		if (!kairos_va_to_pa(mm, va + done, true, &v) ||
-		    !kairos_pte_still_same(&v)) {
+		if (!memx_va_to_pa(mm, va + done, true, &v) ||
+		    !memx_pte_still_same(&v)) {
 			rcu_read_unlock();
 			break;
 		}
@@ -409,7 +409,7 @@ static unsigned long kairos_write_fast(struct mm_struct *mm, unsigned long va,
 	return done;
 }
 
-static unsigned long kairos_write_gup(struct mm_struct *mm, unsigned long va,
+static unsigned long memx_write_gup(struct mm_struct *mm, unsigned long va,
 				      const void *kbuf, unsigned long len)
 {
 	unsigned long done = 0;
@@ -448,9 +448,9 @@ static unsigned long kairos_write_gup(struct mm_struct *mm, unsigned long va,
 	return done;
 }
 
-unsigned long kairos_write_to_mm(struct mm_struct *mm, unsigned long va,
+unsigned long memx_write_to_mm(struct mm_struct *mm, unsigned long va,
 				 const void *kbuf, unsigned long len, bool fast)
 {
-	return fast ? kairos_write_fast(mm, va, kbuf, len)
-		    : kairos_write_gup(mm, va, kbuf, len);
+	return fast ? memx_write_fast(mm, va, kbuf, len)
+		    : memx_write_gup(mm, va, kbuf, len);
 }

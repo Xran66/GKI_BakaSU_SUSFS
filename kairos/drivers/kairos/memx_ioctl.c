@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * kairos_ioctl.c — ioctl 入口与命令分发（built-in 版）
+ * memx_ioctl.c — ioctl 入口与命令分发（built-in 版）
  *
  * ABI 与 .ko 版完全一致：
- *     struct kairos_req { u32 op; u32 pad; u64 arg; };
+ *     struct memx_req { u32 op; u32 pad; u64 arg; };
  *     ioctl(fd, magic, &req);
- * 两层结构：kairos_ioctl() 管生命周期锁，kairos_dispatch() 管命令分发。
+ * 两层结构：memx_ioctl() 管生命周期锁，memx_dispatch() 管命令分发。
  */
 #include <linux/kernel.h>
 #include <linux/slab.h>
@@ -17,7 +17,7 @@
 #include <linux/pid.h>
 #include <linux/mm.h>
 
-#include "kairos.h"
+#include "memx.h"
 
 /* ================================================================== */
 /* 内存读写请求（0x8D0 / 0x8D2）                                       */
@@ -26,7 +26,7 @@
 /* 用法反推出来的，**没有**和客户端二进制逐字段核对过。首次联调时先打印 */
 /* 一次原始字节确认偏移，别直接信。                                     */
 /* ================================================================== */
-struct kairos_mem_req {
+struct memx_mem_req {
 	u32	pid;
 	u32	pad;
 	u64	va;
@@ -44,7 +44,7 @@ struct kairos_mem_req {
 /*   命中就返回 vma->vm_start；没命中返回 0。                          */
 /* 客户端用它"等游戏模块出现"，拿不到就一直每秒轮询。                  */
 /* ================================================================== */
-static unsigned long kairos_find_module_base(struct mm_struct *mm, const char *name)
+static unsigned long memx_find_module_base(struct mm_struct *mm, const char *name)
 {
 	struct vm_area_struct *vma;
 	unsigned long ret = 0;
@@ -76,7 +76,7 @@ static unsigned long kairos_find_module_base(struct mm_struct *mm, const char *n
 /* ================================================================== */
 /* batch read/write (0x801/0x8D1 read, 0x802 write), 64KB chunks       */
 /* ================================================================== */
-static long kairos_do_range(void __user *uarg, bool write)
+static long memx_do_range(void __user *uarg, bool write)
 {
 	struct {
 		__u32 pid;
@@ -95,7 +95,7 @@ static long kairos_do_range(void __user *uarg, bool write)
 	if (!r.len || r.len > 0xA00000 || r.va < 0x1000)
 		return -EINVAL;
 
-	mm = r.pid ? kairos_grab_mm_by_pid(r.pid) : get_task_mm(current);
+	mm = r.pid ? memx_grab_mm_by_pid(r.pid) : get_task_mm(current);
 	if (!mm)
 		return -ESRCH;
 
@@ -113,12 +113,12 @@ static long kairos_do_range(void __user *uarg, bool write)
 				ret = -EFAULT;
 				break;
 			}
-			if (kairos_write_to_mm(mm, r.va + off, kbuf, n, true) != n) {
+			if (memx_write_to_mm(mm, r.va + off, kbuf, n, true) != n) {
 				ret = -EINVAL;
 				break;
 			}
 		} else {
-			if (kairos_read_to_kbuf(mm, r.va + off, kbuf, n) != n) {
+			if (memx_read_to_kbuf(mm, r.va + off, kbuf, n) != n) {
 				ret = -EINVAL;
 				break;
 			}
@@ -148,16 +148,16 @@ static long kairos_do_range(void __user *uarg, bool write)
 /* 之前按 {pid,pad,va,buf,len,mode} 解析，len 落在 entry 数组中间，      */
 /* 永远是非法值 → 每次调用都 -EINVAL，这就是"驱动通但读不到数据"。       */
 /* ================================================================== */
-struct kairos_batch_entry {
+struct memx_batch_entry {
 	__u64	va;
 	__u32	len;
 	__u32	pad;
 };
 
-#define KAIROS_BATCH_OUT_OFF	0x1008
-#define KAIROS_BATCH_OUT_MAX	0x8000
+#define MEMX_BATCH_OUT_OFF	0x1008
+#define MEMX_BATCH_OUT_MAX	0x8000
 
-static long kairos_do_batch(void __user *uarg)
+static long memx_do_batch(void __user *uarg)
 {
 	struct {
 		__u32 pid;
@@ -176,7 +176,7 @@ static long kairos_do_batch(void __user *uarg)
 	if (h.count > 256)
 		return -EINVAL;
 
-	mm = h.pid ? kairos_grab_mm_by_pid(h.pid) : get_task_mm(current);
+	mm = h.pid ? memx_grab_mm_by_pid(h.pid) : get_task_mm(current);
 	if (!mm)
 		return -ESRCH;
 
@@ -187,7 +187,7 @@ static long kairos_do_batch(void __user *uarg)
 	}
 
 	for (i = 0; i < h.count; i++) {
-		struct kairos_batch_entry e;
+		struct memx_batch_entry e;
 		unsigned long n, got;
 
 		if (copy_from_user(&e, (char __user *)uarg + 8 + (size_t)i * sizeof(e),
@@ -198,13 +198,13 @@ static long kairos_do_batch(void __user *uarg)
 		n = e.len;
 		if (!n)
 			continue;
-		if (acc + n > KAIROS_BATCH_OUT_MAX)
+		if (acc + n > MEMX_BATCH_OUT_MAX)
 			break;
 		if (n > SZ_64K)
 			break;
 
 		if (e.va < 0x1000) {		/* 原版对低地址直接给零 */
-			if (clear_user((char __user *)uarg + KAIROS_BATCH_OUT_OFF + acc, n)) {
+			if (clear_user((char __user *)uarg + MEMX_BATCH_OUT_OFF + acc, n)) {
 				ret = -EFAULT;
 				break;
 			}
@@ -212,10 +212,10 @@ static long kairos_do_batch(void __user *uarg)
 			continue;
 		}
 
-		got = kairos_read_to_kbuf(mm, e.va, kbuf, n);
+		got = memx_read_to_kbuf(mm, e.va, kbuf, n);
 		if (got != n)
 			break;
-		if (copy_to_user((char __user *)uarg + KAIROS_BATCH_OUT_OFF + acc,
+		if (copy_to_user((char __user *)uarg + MEMX_BATCH_OUT_OFF + acc,
 				 kbuf, n)) {
 			ret = -EFAULT;
 			break;
@@ -228,9 +228,9 @@ static long kairos_do_batch(void __user *uarg)
 	return ret;
 }
 
-static long __maybe_unused kairos_do_mem(struct kairos_ctx *ctx, void __user *uarg)
+static long __maybe_unused memx_do_mem(struct memx_ctx *ctx, void __user *uarg)
 {
-	struct kairos_mem_req r;
+	struct memx_mem_req r;
 	struct mm_struct *mm;
 	void *kbuf;
 	unsigned long done, n;
@@ -250,7 +250,7 @@ static long __maybe_unused kairos_do_mem(struct kairos_ctx *ctx, void __user *ua
 		mm = get_task_mm(current);
 	} else {
 		mm = (ctx->mm && ctx->mm_pid == r.pid) ? ctx->mm
-						       : kairos_grab_mm_by_pid(r.pid);
+						       : memx_grab_mm_by_pid(r.pid);
 	}
 	if (!mm)
 		return -ESRCH;
@@ -263,7 +263,7 @@ static long __maybe_unused kairos_do_mem(struct kairos_ctx *ctx, void __user *ua
 	}
 
 	write = r.mode & 1;
-#if !KAIROS_WRITE_ENABLE
+#if !MEMX_WRITE_ENABLE
 	if (write) {			/* 写入已停用，代码保留 */
 		ret = -EOPNOTSUPP;
 		goto out;
@@ -276,9 +276,9 @@ static long __maybe_unused kairos_do_mem(struct kairos_ctx *ctx, void __user *ua
 			ret = -EFAULT;
 			goto out;
 		}
-		done = kairos_write_to_mm(mm, r.va, kbuf, n, !(r.mode & 2));
+		done = memx_write_to_mm(mm, r.va, kbuf, n, !(r.mode & 2));
 	} else {
-		done = kairos_read_to_kbuf(mm, r.va, kbuf, n);
+		done = memx_read_to_kbuf(mm, r.va, kbuf, n);
 		if (copy_to_user((void __user *)r.buf, kbuf, done))
 			ret = -EFAULT;
 	}
@@ -295,10 +295,10 @@ out:
 /* ================================================================== */
 /* 分发                                                                */
 /* ================================================================== */
-long kairos_dispatch(struct file *file, u32 magic, u32 op, void __user *uarg)
+long memx_dispatch(struct file *file, u32 magic, u32 op, void __user *uarg)
 {
-	struct kairos_ctx *ctx = file->private_data;
-	u8 buf[KAIROS_MAX_REQ];
+	struct memx_ctx *ctx = file->private_data;
+	u8 buf[MEMX_MAX_REQ];
 	u32 pid, v;
 	long ret;
 
@@ -312,22 +312,22 @@ long kairos_dispatch(struct file *file, u32 magic, u32 op, void __user *uarg)
 	switch (op) {
 	case KOP_AUTH:
 		/* 原版固定读 64 字节；读 255 会越过客户端的小缓冲 */
-		if (copy_from_user(buf, uarg, KAIROS_KEY_LEN))
+		if (copy_from_user(buf, uarg, MEMX_KEY_LEN))
 			return -EFAULT;
-		if (kairos_auth_check(buf))	/* 算法见 kairos_auth.c / decomp_all.md */
+		if (memx_auth_check(buf))	/* 算法见 memx_auth.c / decomp_all.md */
 			return -EACCES;
 		ctx->authed = 1;
 		return 0;
 
 	case KOP_MAGIC:
-		v = KAIROS_MAGIC_REPLY;
+		v = MEMX_MAGIC_REPLY;
 		return copy_to_user(uarg, &v, 4) ? -EFAULT : 0;
 
 	case KOP_KSGL_HIDE_PID:
 	case KOP_KSGL_HIDE_PID2:
 		if (copy_from_user(&pid, uarg, 4))
 			return -EFAULT;
-		/* built-in 版：kgsl debugfs 条目由 kairos_kgsl.c 在创建时就不生成，
+		/* built-in 版：kgsl debugfs 条目由 memx_kgsl.c 在创建时就不生成，
 		 * 不需要事后删除。这里保留命令号仅为了 ABI 兼容，返回成功即可。 */
 		return 0;
 
@@ -336,13 +336,13 @@ long kairos_dispatch(struct file *file, u32 magic, u32 op, void __user *uarg)
 
 	case KOP_MEM_A:
 	case KOP_MEM_A2:
-		return kairos_do_batch(uarg);
+		return memx_do_batch(uarg);
 
 	case KOP_EXIT:
 		/*
 		 * 只解绑本次会话，**不关停驱动**。
 		 *
-		 * 原来这里调 kairos_shutdown_locked() 会把 kairos_initialized 清 0，
+		 * 原来这里调 memx_shutdown_locked() 会把 memx_initialized 清 0，
 		 * 结果是客户端一次 OP_EXIT 之后整个开机内都握手失败，
 		 * 必须重启设备才能再用一次。
 		 *
@@ -357,13 +357,13 @@ long kairos_dispatch(struct file *file, u32 magic, u32 op, void __user *uarg)
 		 * 会立刻被 dispatch 判 -ENOTTY(-25) —— 就是"驱动连着但读不到数据"。
 		 */
 		(void)ctx;
-		kairos_release_ctx();
+		memx_release_ctx();
 		return 0;
 
 	/* 以下命令 .ko 版存在但本次未复刻（触摸注入 / 抓包 / PAC 读写）。
 	 * 保留命令号，返回 -EOPNOTSUPP，保证客户端不会误判成 fd 失效。 */
 	/*
-	 * 触摸注入（见 kairos_touch.c）。
+	 * 触摸注入（见 memx_touch.c）。
 	 *   0x809 attach {screen_w, screen_h, orientation}
 	 *   0x810 down   {slot, x, y}
 	 *   0x811 move   {slot, x, y}
@@ -384,17 +384,17 @@ long kairos_dispatch(struct file *file, u32 magic, u32 op, void __user *uarg)
 			return -EFAULT;
 
 		if (op == KOP_TOUCH_ATTACH)
-			return kairos_touch_attach((int)t.a, (int)t.b, (int)t.c);
+			return memx_touch_attach((int)t.a, (int)t.b, (int)t.c);
 		if (op == KOP_TOUCH_1)
-			return kairos_touch_down((int)t.a, (int)t.b, (int)t.c);
+			return memx_touch_down((int)t.a, (int)t.b, (int)t.c);
 		if (op == KOP_TOUCH_2)
-			return kairos_touch_move((int)t.a, (int)t.b, (int)t.c);
-		return kairos_touch_up((int)t.a);
+			return memx_touch_move((int)t.a, (int)t.b, (int)t.c);
+		return memx_touch_up((int)t.a);
 	}
 
 	case KOP_TOUCH_DETACH:
 	case KOP_TOUCH_DETACH2:
-		return kairos_touch_detach();
+		return memx_touch_detach();
 
 	case KOP_0x920:
 	case KOP_0x921:
@@ -422,13 +422,13 @@ long kairos_dispatch(struct file *file, u32 magic, u32 op, void __user *uarg)
 	 */
 	case KOP_0x801:
 	case KOP_0x8D1:
-		return kairos_do_range(uarg, false);
+		return memx_do_range(uarg, false);
 
 	case KOP_0x802:
-#if KAIROS_WRITE_ENABLE
-		return kairos_do_range(uarg, true);
+#if MEMX_WRITE_ENABLE
+		return memx_do_range(uarg, true);
 #else
-		/* 写入已停用（见 kairos.h 的 KAIROS_WRITE_ENABLE），代码保留 */
+		/* 写入已停用（见 memx.h 的 MEMX_WRITE_ENABLE），代码保留 */
 		return -EOPNOTSUPP;
 #endif
 
@@ -513,7 +513,7 @@ long kairos_dispatch(struct file *file, u32 magic, u32 op, void __user *uarg)
 		if (c.mode >= 4)
 			c.mode = 0;
 
-		kairos_gyro_set(c.enable ? 1 : 0, (int)c.mode,
+		memx_gyro_set(c.enable ? 1 : 0, (int)c.mode,
 				(int)c.scale_x, (int)c.scale_y, (int)c.type_mask);
 
 		if (copy_to_user(uarg, &c, sizeof(c)))
@@ -538,11 +538,11 @@ long kairos_dispatch(struct file *file, u32 magic, u32 op, void __user *uarg)
 		if (r.name && copy_from_user(name, (void __user *)r.name, sizeof(name) - 1))
 			return -EFAULT;
 
-		mm = r.pid ? kairos_grab_mm_by_pid(r.pid) : get_task_mm(current);
+		mm = r.pid ? memx_grab_mm_by_pid(r.pid) : get_task_mm(current);
 		if (!mm)
 			return -ESRCH;
 
-		r.base = (__u64)kairos_find_module_base(mm, name);
+		r.base = (__u64)memx_find_module_base(mm, name);
 		mmput(mm);
 
 		if (copy_to_user(uarg, &r, sizeof(r)))
@@ -558,9 +558,9 @@ long kairos_dispatch(struct file *file, u32 magic, u32 op, void __user *uarg)
 /* ================================================================== */
 /* fd 入口与 fops                                                      */
 /* ================================================================== */
-static long kairos_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+static long memx_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
-	struct kairos_req req;
+	struct memx_req req;
 	bool exclusive;
 	long r;
 
@@ -580,24 +580,24 @@ static long kairos_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
 	/* .ko 版对这四个 op 用 down_write，其余用 down_read；保持一致 */
 	if (exclusive) {
-		down_write(&kairos_lifecycle_sem);
-		r = kairos_active()
-			? kairos_dispatch(file, cmd, req.op, (void __user *)req.arg)
+		down_write(&memx_lifecycle_sem);
+		r = memx_active()
+			? memx_dispatch(file, cmd, req.op, (void __user *)req.arg)
 			: -ENODEV;
-		up_write(&kairos_lifecycle_sem);
+		up_write(&memx_lifecycle_sem);
 	} else {
-		down_read(&kairos_lifecycle_sem);
-		r = kairos_active()
-			? kairos_dispatch(file, cmd, req.op, (void __user *)req.arg)
+		down_read(&memx_lifecycle_sem);
+		r = memx_active()
+			? memx_dispatch(file, cmd, req.op, (void __user *)req.arg)
 			: -ENODEV;
-		up_read(&kairos_lifecycle_sem);
+		up_read(&memx_lifecycle_sem);
 	}
 	return r;
 }
 
-static int kairos_release(struct inode *inode, struct file *file)
+static int memx_release(struct inode *inode, struct file *file)
 {
-	struct kairos_ctx *ctx = file->private_data;
+	struct memx_ctx *ctx = file->private_data;
 
 	if (ctx) {
 		if (ctx->mm)
@@ -609,10 +609,10 @@ static int kairos_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
-const struct file_operations kairos_fops = {
+const struct file_operations memx_fops = {
 #ifdef MODULE
 	.owner		= THIS_MODULE,	/* built-in 时 THIS_MODULE 为 NULL，没必要写 */
 #endif
-	.unlocked_ioctl	= kairos_ioctl,
-	.release	= kairos_release,
+	.unlocked_ioctl	= memx_ioctl,
+	.release	= memx_release,
 };

@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * kairos.h — 内置版公共头
+ * memx.h — 内置版公共头
  *
  * 与 .ko 版的差异（built-in 后能删掉的）：
  *   1. 不再需要 struct 偏移常量（mm->pgd / task->mm 直接用成员）
@@ -8,8 +8,8 @@
  *   3. 不再需要 THIS_MODULE / MODULE_* 宏 / hide_module_work_fn
  *   4. 不再需要 anon_inode "[eventpoll]" 伪装 —— 见 ioctl 注释
  */
-#ifndef _KAIROS_H
-#define _KAIROS_H
+#ifndef _MEMX_H
+#define _MEMX_H
 
 #include <linux/types.h>
 #include <linux/mm_types.h>
@@ -18,14 +18,14 @@
 #include <linux/uaccess.h>
 
 /* 生产构建下所有日志编译为空；审计要求：不留 dmesg 痕迹 */
-#ifdef KAIROS_VERBOSE
-#define kairos_log(fmt, ...)	pr_info("kairos: " fmt, ##__VA_ARGS__)
+#ifdef MEMX_VERBOSE
+#define memx_log(fmt, ...)	pr_info("memx: " fmt, ##__VA_ARGS__)
 #else
-#define kairos_log(fmt, ...)	do { } while (0)
+#define memx_log(fmt, ...)	do { } while (0)
 #endif
-#define kairos_err(fmt, ...)	pr_err_ratelimited("kairos: " fmt, ##__VA_ARGS__)
+#define memx_err(fmt, ...)	pr_err_ratelimited("memx: " fmt, ##__VA_ARGS__)
 
-#define KAIROS_MAX_REQ		0xFF
+#define MEMX_MAX_REQ		0xFF
 /* 客户端用 reboot() 做隐蔽握手拿 ghost fd 时使用的私有 magic
  * （原版 reboot_handler_pre @0x6284 里的字面量，不是任何标准 reboot 常量）*/
 /*
@@ -35,13 +35,13 @@
  * 关闭它可以：
  *   · 避免误写游戏内存（写穿 COW 会污染 fork 共享页 / page cache）
  *   · 少一条可被检测的攻击面
- * 代码全部保留在 kairos_mem.c 里，需要时把这个宏改成 1 即可恢复。
+ * 代码全部保留在 memx_mem.c 里，需要时把这个宏改成 1 即可恢复。
  */
-#ifndef KAIROS_WRITE_ENABLE
-#define KAIROS_WRITE_ENABLE	0
+#ifndef MEMX_WRITE_ENABLE
+#define MEMX_WRITE_ENABLE	0
 #endif
 
-#define KAIROS_BOOT_MAGIC1	0x48931414
+#define MEMX_BOOT_MAGIC1	0x48931414
 /*
  * 客户端的真实调用（用 kprobe 在 __arm64_sys_reboot 上实测抓到）：
  *     reboot(0x48931414, 0x51239123, 0, &out)
@@ -49,15 +49,15 @@
  *
  * 之前反编译 reboot_handler_pre 时把 `*((_DWORD *)v2 + 2)` 当成了偏移 16（cmd），
  * 实际 (DWORD*)+2 = **+8 字节 = magic2**，所以位置判错了。
- * KAIROS_BOOT_MAGIC3 保留为兼容别名。
+ * MEMX_BOOT_MAGIC3 保留为兼容别名。
  */
-#define KAIROS_BOOT_MAGIC2	0x51239123
-#define KAIROS_BOOT_MAGIC3	KAIROS_BOOT_MAGIC2
-#define KAIROS_KEY_LEN		64
-#define KAIROS_MAGIC_REPLY	1102
+#define MEMX_BOOT_MAGIC2	0x51239123
+#define MEMX_BOOT_MAGIC3	MEMX_BOOT_MAGIC2
+#define MEMX_KEY_LEN		64
+#define MEMX_MAGIC_REPLY	1102
 
 /* 用户态 ABI 与 .ko 版保持一致，这样现有客户端二进制不用改 */
-struct kairos_req {
+struct memx_req {
 	__u32 op;
 	__u32 pad;
 	__u64 arg;
@@ -69,14 +69,14 @@ struct kairos_req {
  * （会在 /sys/module/kernel/parameters/ 下露出来），所以走这条 op。
  * scale_x/scale_y 是百分比：100 = 原值不改写。
  */
-/* kairos_touch.c */
-int kairos_touch_attach(int screen_w, int screen_h, int orientation);
-int kairos_touch_down(int slot, int x, int y);
-int kairos_touch_move(int slot, int x, int y);
-int kairos_touch_up(int slot);
-int kairos_touch_detach(void);
+/* memx_touch.c */
+int memx_touch_attach(int screen_w, int screen_h, int orientation);
+int memx_touch_down(int slot, int x, int y);
+int memx_touch_move(int slot, int x, int y);
+int memx_touch_up(int slot);
+int memx_touch_detach(void);
 
-struct kairos_gyro_cfg {
+struct memx_gyro_cfg {
 	__s32	enable;
 	__s32	mode;		/* 0 正常 / 1 XY互换取反 / 2 双取反 / 3 只互换 */
 	__s32	scale_x;
@@ -84,7 +84,7 @@ struct kairos_gyro_cfg {
 	__s32	type_mask;	/* bit0: type 4, bit1: type 16 */
 };
 
-enum kairos_op {
+enum memx_op {
 	KOP_AUTH		= 0x800,
 	KOP_0x801		= 0x801,
 	KOP_0x8D1		= 0x8D1,
@@ -117,7 +117,7 @@ enum kairos_op {
 	KOP_0x922		= 0x922,
 };
 
-struct kairos_ctx {
+struct memx_ctx {
 	u8			authed;
 	u32			magic;
 	int			fd;		/* 下发出去的 fd，幂等重发时回给客户端 */
@@ -125,31 +125,31 @@ struct kairos_ctx {
 	u32			mm_pid;
 };
 
-extern struct rw_semaphore kairos_lifecycle_sem;
-extern u8 kairos_initialized;
-extern struct kairos_ctx *g_ctx;
-extern const struct file_operations kairos_fops;
+extern struct rw_semaphore memx_lifecycle_sem;
+extern u8 memx_initialized;
+extern struct memx_ctx *g_ctx;
+extern const struct file_operations memx_fops;
 
-int  kairos_auth_check(const u8 *blob);
-int  kairos_expected_key(char *out, size_t outsz);
-void kairos_base64(char *out, const u8 *in, int len);
-bool kairos_is_gyro_packet(const void *hdr, size_t len);
-int  kairos_gyro_patch(unsigned int seq, void __user *data, size_t len);
-unsigned int kairos_gyro_stamp(void);
+int  memx_auth_check(const u8 *blob);
+int  memx_expected_key(char *out, size_t outsz);
+void memx_base64(char *out, const u8 *in, int len);
+bool memx_is_gyro_packet(const void *hdr, size_t len);
+int  memx_gyro_patch(unsigned int seq, void __user *data, size_t len);
+unsigned int memx_gyro_stamp(void);
 
 /* ---- mem ---- */
-struct mm_struct *kairos_grab_mm_by_pid(pid_t pid);
-unsigned long kairos_read_to_kbuf(struct mm_struct *mm, unsigned long va,
+struct mm_struct *memx_grab_mm_by_pid(pid_t pid);
+unsigned long memx_read_to_kbuf(struct mm_struct *mm, unsigned long va,
 				  void *kbuf, unsigned long len);
-unsigned long kairos_write_to_mm(struct mm_struct *mm, unsigned long va,
+unsigned long memx_write_to_mm(struct mm_struct *mm, unsigned long va,
 				 const void *kbuf, unsigned long len, bool safe);
 
 /* ---- lifecycle ---- */
-void kairos_shutdown_locked(void);
-void kairos_release_ctx(void);
+void memx_shutdown_locked(void);
+void memx_release_ctx(void);
 
 /* ---- ioctl ---- */
-long kairos_dispatch(struct file *file, u32 magic, u32 op, void __user *arg);
+long memx_dispatch(struct file *file, u32 magic, u32 op, void __user *arg);
 
 /* ---- 从被 patch 的内核源码里调用（见 patches/）---- */
 /*
@@ -158,14 +158,14 @@ long kairos_dispatch(struct file *file, u32 magic, u32 op, void __user *arg);
  * 因为我们要改的是用户缓冲本身，而不是已经 import 好的 iov_iter。
  * 内部先做廉价的长度/类型预筛，非陀螺仪包几乎零开销返回。
  */
-void kairos_hook_sendto_buf(void __user *buf, size_t len);
-bool kairos_hook_reboot(int magic1, int magic2, unsigned int cmd,
+void memx_hook_sendto_buf(void __user *buf, size_t len);
+bool memx_hook_reboot(int magic1, int magic2, unsigned int cmd,
 			void __user *arg);
-void kairos_gyro_set(int enable, int mode, int sx, int sy, int mask);
+void memx_gyro_set(int enable, int mode, int sx, int sy, int mask);
 
 /* ---- 供内核其它子系统查询是否已初始化 ----
  * 必须是真函数（不能 static inline）：被 patch 的 net/socket.c 和
  * kernel/reboot.c 会 extern 引用它，inline 版在那些 TU 里没有符号。 */
-bool kairos_active(void);
+bool memx_active(void);
 
-#endif /* _KAIROS_H */
+#endif /* _MEMX_H */

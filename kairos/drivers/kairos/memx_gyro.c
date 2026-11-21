@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * kairos_gyro.c — 陀螺仪包改写（从 gyro_sendto_handler @0x1f4b8 转写）
+ * memx_gyro.c — 陀螺仪包改写（从 gyro_sendto_handler @0x1f4b8 转写）
  *
  * ── 原理 ────────────────────────────────────────────────────
  * 游戏的传感器上报以 UDP sendto 发出，包体是定长记录数组：
@@ -15,7 +15,7 @@
  * ── 两个必须注意的内核限制 ───────────────────────────────────
  *  1. arm64 内核用 -mgeneral-regs-only 编译，**禁止任何浮点/SIMD 运算**。
  *     所以这里的缩放不能用 float，只能用 IEEE754 整数位运算实现
- *     （kairos_f32_add：拆符号/阶码/尾数 → 对齐 → 相加 → 重新规格化）。
+ *     （memx_f32_add：拆符号/阶码/尾数 → 对齐 → 相加 → 重新规格化）。
  *  2. 不能用 module_param：built-in 时会在
  *     /sys/module/kernel/parameters/ 下露出 gyro_enable 等五个参数，
  *     属于白送的指纹。改用 ioctl 配置，编进内核时参数表为空。
@@ -29,7 +29,7 @@
 #include <linux/string.h>
 #include <linux/math64.h>
 
-#include "kairos.h"
+#include "memx.h"
 
 #define GYRO_REC_SIZE	0x68
 #define GYRO_OFF_TYPE	0x08
@@ -45,7 +45,7 @@ static int gyro_type_mask	= 0x3;	/* bit0: type 4, bit1: type 16 */
 
 static unsigned int g_gyro_seq;
 
-unsigned int kairos_gyro_stamp(void)
+unsigned int memx_gyro_stamp(void)
 {
 	return ++g_gyro_seq;
 }
@@ -68,7 +68,7 @@ unsigned int kairos_gyro_stamp(void)
  * 对每个采样做 sample + offset。之前按百分比乘法处理，
  * 客户端送来的 1.0f(0x3F800000) 被当成十亿倍，画面直接乱掉、方向反了。
  */
-static u32 kairos_f32_add(u32 a, u32 b)
+static u32 memx_f32_add(u32 a, u32 b)
 {
 	int ea = (a >> 23) & 0xff, eb = (b >> 23) & 0xff;
 	u32 ma = a & 0x7fffff, mb = b & 0x7fffff;
@@ -131,18 +131,18 @@ static u32 kairos_f32_add(u32 a, u32 b)
 	return (s << 31) | ((u32)e << 23) | (m & 0x7fffff);
 }
 
-static inline u32 kairos_f32_neg(u32 bits)
+static inline u32 memx_f32_neg(u32 bits)
 {
 	return bits ^ 0x80000000u;
 }
 
-static inline bool kairos_type_match(u32 type)
+static inline bool memx_type_match(u32 type)
 {
 	return (type == 4 && (gyro_type_mask & 1)) ||
 	       (type == 16 && (gyro_type_mask & 2));
 }
 
-bool kairos_is_gyro_packet(const void *hdr, size_t len)
+bool memx_is_gyro_packet(const void *hdr, size_t len)
 {
 	const u8 *p = hdr;
 	u32 type;
@@ -153,13 +153,13 @@ bool kairos_is_gyro_packet(const void *hdr, size_t len)
 		return false;
 
 	memcpy(&type, p + GYRO_OFF_TYPE, sizeof(type));
-	return kairos_type_match(type);
+	return memx_type_match(type);
 }
 
 /*
  * 就地改写一个包，返回改写的记录数（负数=失败）。
  */
-int kairos_gyro_patch(unsigned int seq, void __user *data, size_t len)
+int memx_gyro_patch(unsigned int seq, void __user *data, size_t len)
 {
 	u8 *kbuf;
 	size_t i, nrec;
@@ -190,12 +190,12 @@ int kairos_gyro_patch(unsigned int seq, void __user *data, size_t len)
 		break;
 	}
 	case 2:				/* 双取反 */
-		off_x = kairos_f32_neg(off_x);
-		off_y = kairos_f32_neg(off_y);
+		off_x = memx_f32_neg(off_x);
+		off_y = memx_f32_neg(off_y);
 		break;
 	case 1: {			/* 互换并取反 */
-		u32 t = kairos_f32_neg(off_y);
-		off_y = kairos_f32_neg(off_x);
+		u32 t = memx_f32_neg(off_y);
+		off_y = memx_f32_neg(off_x);
 		off_x = t;
 		break;
 	}
@@ -209,14 +209,14 @@ int kairos_gyro_patch(unsigned int seq, void __user *data, size_t len)
 		u32 type, bx, by;
 
 		memcpy(&type, rec + GYRO_OFF_TYPE, 4);
-		if (!kairos_type_match(type))
+		if (!memx_type_match(type))
 			continue;
 
 		memcpy(&bx, rec + GYRO_OFF_X, 4);
 		memcpy(&by, rec + GYRO_OFF_Y, 4);
 
-		bx = kairos_f32_add(bx, off_x);
-		by = kairos_f32_add(by, off_y);
+		bx = memx_f32_add(bx, off_x);
+		by = memx_f32_add(by, off_y);
 
 		memcpy(rec + GYRO_OFF_X, &bx, 4);
 		memcpy(rec + GYRO_OFF_Y, &by, 4);
@@ -238,7 +238,7 @@ int kairos_gyro_patch(unsigned int seq, void __user *data, size_t len)
 /* 廉价预筛顺序：长度取模 → 内存最多 104 字节探针 → 类型判断            */
 /* 普通 UDP 包（报文长度 % 104 != 0）第一关就出去了。                   */
 /* ================================================================== */
-void kairos_hook_sendto_buf(void __user *buf, size_t len)
+void memx_hook_sendto_buf(void __user *buf, size_t len)
 {
 	u8 probe[GYRO_REC_SIZE];
 
@@ -248,16 +248,16 @@ void kairos_hook_sendto_buf(void __user *buf, size_t len)
 		return;
 	if (copy_from_user(probe, buf, sizeof(probe)))
 		return;
-	if (!kairos_is_gyro_packet(probe, len))
+	if (!memx_is_gyro_packet(probe, len))
 		return;
 
-	kairos_gyro_patch(kairos_gyro_stamp(), buf, len);
+	memx_gyro_patch(memx_gyro_stamp(), buf, len);
 }
 
 /* ================================================================== */
 /* 运行期配置（替代 .ko 版的 ioctl 写全局变量）                         */
 /* ================================================================== */
-void kairos_gyro_set(int enable, int mode, int sx, int sy, int mask)
+void memx_gyro_set(int enable, int mode, int sx, int sy, int mask)
 {
 	WRITE_ONCE(gyro_enable, enable);
 	WRITE_ONCE(gyro_mode, mode);
