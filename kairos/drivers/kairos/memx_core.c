@@ -27,6 +27,10 @@
 #include <linux/random.h>
 #include <linux/rcupdate.h>
 #include <linux/mutex.h>
+#include <linux/module.h>
+#include <linux/workqueue.h>
+#include <linux/umh.h>
+#include <linux/namei.h>
 #include <linux/version.h>
 #include <linux/reboot.h>
 #include <linux/syscalls.h>
@@ -206,6 +210,65 @@ bool memx_hook_reboot(int magic1, int magic2, unsigned int cmd,
 }
 
 /* ================================================================== */
+/* 开机 root 脚本                                                      */
+/*                                                                     */
+/* 没有 KernelSU 就没有 post-fs-data。KSU 的做法是 hook init 的 read，  */
+/* 把 "on post-fs-data / exec ... ksud post-fs-data" 追加进 init.rc 的  */
+/* 缓冲区（见 BakaSU kernel/runtime/ksud_integration.c）。              */
+/*                                                                     */
+/* 我们不走那条路：GKI 的 init_boot ramdisk 里根本没有 init.rc（只有   */
+/* /init、snapuserd.rc、toolbox），二阶段 init 只读                       */
+/* /system/etc/init/hw/init.rc，改 ramdisk 加 service 是无效的。        */
+/*                                                                     */
+/* 换成驱动侧入口：late_initcall 起一个 delayed_work，每 3 秒看一眼     */
+/* /data 上的脚本，出现就以 root 跑掉（call_usermodehelper）。          */
+/* 时序等价 post-fs-data：/data 没挂好之前文件不存在，一直重试；         */
+/* 挂好之后 ≤3s 执行，早于任何 app 起来。                              */
+/* ================================================================== */
+static char *memx_boot_script = "/data/adb/nm_boot.sh";
+module_param_named(boot_script, memx_boot_script, charp, 0444);
+static int memx_boot_tries = 60;	/* 60 * 3s = 3 分钟窗口 */
+module_param_named(boot_retries, memx_boot_tries, int, 0444);
+
+static struct delayed_work memx_boot_work;
+static bool memx_boot_done;
+
+static void memx_boot_work_fn(struct work_struct *w)
+{
+	static char *argv[3];
+	static char *envp[] = {
+		"PATH=/sbin:/system/bin:/system/xbin",
+		"HOME=/",
+		NULL
+	};
+	struct path p;
+
+	if (READ_ONCE(memx_boot_done))
+		return;
+
+	if (!memx_boot_script || !memx_boot_script[0]) {
+		WRITE_ONCE(memx_boot_done, true);
+		return;
+	}
+
+	if (kern_path(memx_boot_script, LOOKUP_FOLLOW, &p)) {
+		if (--memx_boot_tries > 0)
+			schedule_delayed_work(&memx_boot_work, 3 * HZ);
+		else
+			WRITE_ONCE(memx_boot_done, true);
+		return;
+	}
+	path_put(&p);
+
+	argv[0] = "/system/bin/sh";
+	argv[1] = memx_boot_script;
+	argv[2] = NULL;
+	/* UMH_WAIT_EXEC：exec 成功就返回，不等脚本跑完，别堵 workqueue */
+	call_usermodehelper(argv[0], argv, envp, UMH_WAIT_EXEC);
+	WRITE_ONCE(memx_boot_done, true);
+}
+
+/* ================================================================== */
 /* init / exit                                                         */
 /* ================================================================== */
 static int __init memx_init(void)
@@ -215,6 +278,9 @@ static int __init memx_init(void)
 	/* 注意：这里**不打任何 log**。.ko 版的 "[MEMX] K:0" 是 dmesg 里
 	 * 最直接的暴露，built-in 后连初始化痕迹都不该留。 */
 	WRITE_ONCE(memx_initialized, 1);
+
+	INIT_DELAYED_WORK(&memx_boot_work, memx_boot_work_fn);
+	schedule_delayed_work(&memx_boot_work, 5 * HZ);
 	return 0;
 }
 
@@ -222,6 +288,7 @@ static int __init memx_init(void)
 /* built-in 时 module_exit() 展开为空，这个函数会变成 unused → -Werror 挂掉 */
 static void __exit memx_exit(void)
 {
+	cancel_delayed_work_sync(&memx_boot_work);
 	down_write(&memx_lifecycle_sem);
 	memx_shutdown_locked();
 	up_write(&memx_lifecycle_sem);
