@@ -1,7 +1,12 @@
 # 只验证 kairos/skroot/patch_kernel_root 能不能编译（不编内核，两三分钟出结果）
 name: SKRoot patcher probe
 
+# 顺手带一个 push 触发：workflow 文件在非默认分支上只有跑过一次才会被
+# GitHub 注册进 Actions 列表，之后才能用 workflow_dispatch 手动触发。
 on:
+  push:
+    branches: [kairos-ko-test]
+    paths: [kairos/skroot/**, .github/workflows/skroot-probe.yml]
   workflow_dispatch:
 
 permissions:
