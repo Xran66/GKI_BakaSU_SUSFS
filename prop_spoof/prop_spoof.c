@@ -1555,6 +1555,53 @@ static int prop_hooks_install(void)
 				s0++;
 			}
 			pr_info("prop_spoof: /sys soc0 伪装就绪 prepped=%d\n", s0);
+
+		/* ---- /proc 里的三个"文件级"探针：version / cmdline / interrupts ----
+		 * 不走 PDE（6.6 上 find_proc_pde("version") 返回 NULL），直接用
+		 * 和 soc0 一样的「真 inode → 假文件」懒加载：目标 uid 读这几个文件时
+		 * 由 prop_lazy_read_iter 换成假文件的 read_iter。
+		 * 真机值：version=6.12.58-android16-6-…；cmdline 里全是 qcom/msm；
+		 * interrupts 里 14 处 qcom_*。都是 app 能直接读的硬指纹。 */
+		{
+			static const char *proc_files[] = {
+				"version", "cmdline", "interrupts",
+			};
+			int p0 = 0;
+
+			for (j = 0; j < (int)ARRAY_SIZE(proc_files); j++) {
+				struct file *realp, *fakep;
+				struct prop_hook *hp;
+
+				if (prop_hook_count >= PROP_MAX_FILES)
+					break;
+				snprintf(rp, sizeof(rp), "/proc/%s", proc_files[j]);
+				snprintf(fp, sizeof(fp), "%s/proc/%s",
+					 sys_fake_dir, proc_files[j]);
+				realp = fo(rp, O_RDONLY, 0);
+				if (IS_ERR(realp)) {
+					skipped++;
+					continue;
+				}
+				fakep = fo(fp, O_RDONLY, 0);
+				if (IS_ERR(fakep)) {
+					filp_close(realp, NULL);
+					skipped++;
+					pr_info("prop_spoof: 缺假文件 %s/proc/%s\n",
+						sys_fake_dir, proc_files[j]);
+					continue;
+				}
+				hp = &prop_hooks[prop_hook_count++];
+				snprintf(hp->name, PROP_NAME_LEN, "proc/%s",
+					 proc_files[j]);
+				hp->inode = realp->f_inode;
+				hp->fake_file = fakep;
+				hp->orig_fops = hp->inode->i_fop;
+				ihold(hp->inode);
+				filp_close(realp, NULL);
+				p0++;
+			}
+			pr_info("prop_spoof: /proc 文件伪装就绪 prepped=%d\n", p0);
+		}
 		}
 
 		{
