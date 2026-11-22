@@ -227,21 +227,26 @@ bool memx_hook_reboot(int magic1, int magic2, unsigned int cmd,
 /* ================================================================== */
 static char *memx_boot_script = "/data/adb/nm_boot.sh";
 module_param_named(boot_script, memx_boot_script, charp, 0444);
-static int memx_boot_tries = 60;	/* 60 * 3s = 3 分钟窗口 */
+static int memx_boot_tries = 240;	/* 240 * 3s = 12 分钟窗口 */
 module_param_named(boot_retries, memx_boot_tries, int, 0444);
 
 static struct delayed_work memx_boot_work;
 static bool memx_boot_done;
 
+/*
+ * 注意这里**不能**用 kern_path() 判存在：
+ * 这个 work 跑在 kworker 上，current->fs 是 NULL，kern_path() 会直接炸。
+ * 改成让 shell 自己去判：/data 没挂好时 `[ -f ... ]` 为假、`&&` 短路、退出码 1，
+ * 我们据此重试；挂好之后 exec 到脚本、退出码 0，收工。
+ *
+ * UMH_WAIT_PROC（而不是 WAIT_EXEC）：只有等到脚本真正跑完才能拿到它的退出码。
+ */
 static void memx_boot_work_fn(struct work_struct *w)
 {
-	static char *argv[3];
-	static char *envp[] = {
-		"PATH=/sbin:/system/bin:/system/xbin",
-		"HOME=/",
-		NULL
-	};
-	struct path p;
+	static char *argv[] = { "/system/bin/sh", "-c", NULL, NULL };
+	static char *envp[] = { "PATH=/sbin:/system/bin:/system/xbin", "HOME=/", NULL };
+	static char cmd[256];
+	int rc;
 
 	if (READ_ONCE(memx_boot_done))
 		return;
@@ -251,21 +256,20 @@ static void memx_boot_work_fn(struct work_struct *w)
 		return;
 	}
 
-	if (kern_path(memx_boot_script, LOOKUP_FOLLOW, &p)) {
-		if (--memx_boot_tries > 0)
-			schedule_delayed_work(&memx_boot_work, 3 * HZ);
-		else
-			WRITE_ONCE(memx_boot_done, true);
+	snprintf(cmd, sizeof(cmd), "[ -f %s ] || exit 1; exec /system/bin/sh %s",
+		 memx_boot_script, memx_boot_script);
+	argv[2] = cmd;
+
+	rc = call_usermodehelper(argv[0], argv, envp, UMH_WAIT_PROC);
+	if (rc == 0) {
+		WRITE_ONCE(memx_boot_done, true);
 		return;
 	}
-	path_put(&p);
 
-	argv[0] = "/system/bin/sh";
-	argv[1] = memx_boot_script;
-	argv[2] = NULL;
-	/* UMH_WAIT_EXEC：exec 成功就返回，不等脚本跑完，别堵 workqueue */
-	call_usermodehelper(argv[0], argv, envp, UMH_WAIT_EXEC);
-	WRITE_ONCE(memx_boot_done, true);
+	if (--memx_boot_tries > 0)
+		schedule_delayed_work(&memx_boot_work, 3 * HZ);
+	else
+		WRITE_ONCE(memx_boot_done, true);
 }
 
 /* ================================================================== */
