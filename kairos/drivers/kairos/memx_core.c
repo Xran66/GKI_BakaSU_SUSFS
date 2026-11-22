@@ -17,6 +17,8 @@
 #include <linux/kernel.h>
 #include <linux/kprobes.h>
 #include <linux/fs_struct.h>
+#include <linux/nsproxy.h>
+#include <linux/pid.h>
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/sched.h>
@@ -257,6 +259,22 @@ static bool memx_boot_root_ok;
  * 这就是之前 5s/30s/60s 试了十几次都跑不起来的原因。*/
 static int memx_umh_init(struct subprocess_info *si, struct cred *new)
 {
+	struct task_struct *init_tsk;
+	struct nsproxy *ns;
+
+	/* 关键：kworker 的 mount namespace 是 fork 时那份，init 后来挂的 /data
+	 * 它看不到（所以前面 set_fs_root 也没用）。把当前进程的 nsproxy 换成
+	 * init(PID 1) 的，/data、/vendor 就都在了。 */
+	init_tsk = pid_task(find_get_pid(1), PIDTYPE_PID);
+	if (init_tsk) {
+		rcu_read_lock();
+		ns = task_nsproxy(init_tsk);
+		if (ns)
+			get_nsproxy(ns);
+		rcu_read_unlock();
+		if (ns)
+			switch_task_namespaces(current, ns);
+	}
 	if (memx_boot_root_ok)
 		set_fs_root(current->fs, &memx_boot_root);
 	return 0;
