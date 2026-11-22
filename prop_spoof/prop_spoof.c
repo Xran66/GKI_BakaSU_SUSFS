@@ -752,7 +752,7 @@ static int memx_dir_filter_install(const char *path)
 	return ret ? ret : 0;
 }
 
-static void memx_dir_filter_remove(void)
+__maybe_unused static void memx_dir_filter_remove(void)
 {
 	int i;
 
