@@ -261,22 +261,25 @@ static int memx_umh_init(struct subprocess_info *si, struct cred *new)
 {
 	struct task_struct *init_tsk;
 	struct nsproxy *ns;
+	struct path root;
 
-	/* 关键：kworker 的 mount namespace 是 fork 时那份，init 后来挂的 /data
-	 * 它看不到（所以前面 set_fs_root 也没用）。把当前进程的 nsproxy 换成
-	 * init(PID 1) 的，/data、/vendor 就都在了。 */
 	init_tsk = pid_task(find_get_pid(1), PIDTYPE_PID);
-	if (init_tsk) {
-		rcu_read_lock();
-		ns = init_tsk->nsproxy;	/* 6.6 没有 task_nsproxy() 了 */
-		if (ns)
-			get_nsproxy(ns);
-		rcu_read_unlock();
-		if (ns)
-			switch_task_namespaces(current, ns);
-	}
-	if (memx_boot_root_ok)
-		set_fs_root(current->fs, &memx_boot_root);
+	if (!init_tsk)
+		return 0;
+
+	/* 1) 换成 init 的 mount/pid/net 命名空间 */
+	rcu_read_lock();
+	ns = init_tsk->nsproxy;
+	if (ns)
+		get_nsproxy(ns);
+	rcu_read_unlock();
+	if (ns)
+		switch_task_namespaces(current, ns);
+
+	/* 2) root 也要用 init 的（之前缓存的 root 是 ramdisk 那份，切了 ns 也用不了）*/
+	get_fs_root(init_tsk->fs, &root);
+	set_fs_root(current->fs, &root);
+	path_put(&root);
 	return 0;
 }
 
@@ -330,10 +333,6 @@ static int memx_exec_pre(struct kprobe *p, struct pt_regs *regs)
 		return 0;
 
 	if (atomic_cmpxchg(&memx_boot_fired, 0, 1) == 0) {
-		if (!memx_boot_root_ok) {
-			get_fs_root(current->fs, &memx_boot_root);
-			memx_boot_root_ok = true;
-		}
 		pr_info("memx: 看到 zygote exec，12s 后跑 nm_boot.sh\n");
 		schedule_delayed_work(&memx_boot_work, 12 * HZ);
 	}
