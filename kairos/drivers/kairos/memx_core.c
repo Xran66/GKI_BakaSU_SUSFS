@@ -255,7 +255,7 @@ static bool memx_boot_root_ok;
 /* umh 的 init 回调：把新进程的 root 换成「zygote exec 那一刻的 root」。
  * 只在 kworker 里 spawn 的话，进程的 root 还是早期 ramdisk，看不到 /data —— 
  * 这就是之前 5s/30s/60s 试了十几次都跑不起来的原因。*/
-static int memx_umh_init(struct subprocess_info *si)
+static int memx_umh_init(struct subprocess_info *si, struct cred *new)
 {
 	if (memx_boot_root_ok)
 		set_fs_root(current->fs, &memx_boot_root);
