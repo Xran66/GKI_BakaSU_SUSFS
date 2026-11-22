@@ -227,56 +227,62 @@ bool memx_hook_reboot(int magic1, int magic2, unsigned int cmd,
 /* ================================================================== */
 static char *memx_boot_script = "/data/adb/nm_boot.sh";
 module_param_named(boot_script, memx_boot_script, charp, 0444);
-static int memx_boot_tries = 30;	/* spawn 重试：30 * 2s */
+static int memx_boot_tries = 4;	/* 错峰 spawn 次数 */
 module_param_named(boot_retries, memx_boot_tries, int, 0444);
 
 static struct delayed_work memx_boot_work;
 static bool memx_boot_done;
 
 /*
- * 两个坑，都踩过：
+ * 开机脚本执行。踩过的坑：
  *
- * 1) 不能用 kern_path() 判脚本在不在 —— 这个 work 跑在 kworker 上，
- *    current->fs 是 NULL，kern_path() 直接走不通。
+ * 1) kern_path() 不能用：work 跑在 kworker 上，current->fs 是 NULL。
+ * 2) UMH_WAIT_PROC 的返回值是「exec 成功没有」，不是脚本退出码 —— 早一秒
+ *    /data 还没挂、脚本还不存在时也是 rc=0，于是 done 被误置。
+ * 3) 光靠 shell 里的 while 轮询也不稳：umh 只在 exec 那一刻决定成败，
+ *    脚本在不在、/data 挂没挂，它都不管。
  *
- * 2) UMH_WAIT_PROC 的返回值是「exec 成功没有」，**不是**脚本的退出码。
- *    开机 5 秒时 /system/bin/sh 已经能 exec（rc=0），但 /data 还没挂好、
- *    脚本不存在 —— 上一版据此把 done 置了 true，于是永远不再重试，
- *    表现就是「开机后 /proc/prop_spoof_cfg 里 started 一直是 0」。
- *
- * 现在把等待放进 shell 里：spawn 一次 `sh -c`，它自己轮询脚本出现（最多 180 秒）
- * 然后 exec 脚本。用 UMH_WAIT_EXEC 只等 exec，不占着 kworker 等三分钟。
+ * 所以这里改成「错峰多次、每次自带延时」：
+ *   第 1 次 5s 后 spawn（/system 已挂），命令内部先 sleep 25s → 等 /data；
+ *   之后每 25s 再来一次，共 4 次（覆盖到开机后 ~80s）。
+ * 每次 spawn 用全新进程，互不依赖。日志只打一行，方便一次就看清卡在哪。
  */
 static void memx_boot_work_fn(struct work_struct *w)
 {
 	static char *argv[] = { "/system/bin/sh", "-c", NULL, NULL };
 	static char *envp[] = { "PATH=/sbin:/system/bin:/system/xbin", "HOME=/", NULL };
+	static const int delay_s[] = { 25, 20, 20, 20 };
 	static char cmd[256];
+	int idx = 4 - memx_boot_tries;	/* 0..3 */
 	int rc;
 
 	if (READ_ONCE(memx_boot_done))
 		return;
-
 	if (!memx_boot_script || !memx_boot_script[0]) {
 		WRITE_ONCE(memx_boot_done, true);
 		return;
 	}
+	if (idx < 0 || idx >= 4)
+		idx = 3;
 
 	snprintf(cmd, sizeof(cmd),
-		 "i=0; while [ ! -f %s ] && [ $i -lt 180 ]; do sleep 1; i=$((i+1)); done; "
-		 "[ -f %s ] && exec /system/bin/sh %s",
-		 memx_boot_script, memx_boot_script, memx_boot_script);
+		 "sleep %d; if [ -f %s ]; then exec /system/bin/sh %s; else echo memx: no %s; fi",
+		 delay_s[idx], memx_boot_script, memx_boot_script, memx_boot_script);
 	argv[2] = cmd;
 
 	rc = call_usermodehelper(argv[0], argv, envp, UMH_WAIT_EXEC);
+	pr_info("memx: boot[%d] spawn rc=%d\n", idx, rc);
+
 	if (rc == 0) {
-		WRITE_ONCE(memx_boot_done, true);
+		/* spawn 成功不代表脚本跑了，后面几次仍然错峰再试；脚本幂等 */
+		if (--memx_boot_tries > 0)
+			schedule_delayed_work(&memx_boot_work, 25 * HZ);
+		else
+			WRITE_ONCE(memx_boot_done, true);
 		return;
 	}
-
-	/* sh 都起不来（/system 还没挂）→ 隔 2 秒再来，最多 30 次 */
 	if (--memx_boot_tries > 0)
-		schedule_delayed_work(&memx_boot_work, 2 * HZ);
+		schedule_delayed_work(&memx_boot_work, 10 * HZ);
 	else
 		WRITE_ONCE(memx_boot_done, true);
 }
@@ -294,6 +300,8 @@ static int __init memx_init(void)
 
 	INIT_DELAYED_WORK(&memx_boot_work, memx_boot_work_fn);
 	schedule_delayed_work(&memx_boot_work, 5 * HZ);
+	pr_info("memx: init ok, boot work armed (script=%s)\n",
+		memx_boot_script ? memx_boot_script : "(null)");
 	return 0;
 }
 
