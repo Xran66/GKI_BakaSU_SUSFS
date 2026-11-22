@@ -528,6 +528,8 @@ static ssize_t cfg_write(struct file *f, const char __user *ub, size_t n,
 				r = prop_hooks_install();
 			if (!r)
 				ver_hook_install();	/* 失败不阻断 start */
+			memx_dir_filter_install("/sys/class");
+			memx_dir_filter_install("/sys/module");
 			if (!r)
 				r = lsm_install();
 			if (r) {
@@ -636,6 +638,133 @@ static void hook_remove(void)
 	pr_info("prop_spoof: cpuinfo hook 已恢复\n");
 	hooked = false;
 	cpuinfo_pde = NULL;
+}
+
+/* ==================================================================
+ * /sys/class、/sys/module 的 readdir 过滤
+ *
+ * 目标：目标 uid 列举这两个目录时看不到内核里挂着的骁龙痕迹
+ *      （class/kgsl、module/msm_*、governor_msm_adreno_tz …）。
+ *      kernfs 是共享 inode，whiteout 会崩内核（实测），所以只能在这一层过滤。
+ *
+ * 做法：把这两个目录 inode 的 i_fop 换成包装版，只替换 iterate_shared；
+ *      只有 is_target() 为真时才用过滤用的 dir_context，其他进程原样透传。
+ * ================================================================== */
+struct memx_dir_hook {
+	struct inode *inode;
+	const struct file_operations *orig;
+	struct file_operations fops;
+	struct dir_context *caller;
+};
+static struct memx_dir_hook memx_dir_hooks[2];
+static int memx_dir_hook_count;
+
+struct memx_filter_ctx {
+	struct dir_context ctx;      /* 必须第一项：回调里 container_of 回来 */
+	struct dir_context *orig;
+};
+
+static bool memx_name_hidden(const char *name, int nlen)
+{
+	static const char *bad[] = {
+		"kgsl", "adreno", "msm_drm", "msm_dma_iommu_mapping",
+		"msm_geni_serial", "msm_ion", "msm_sps", "msm_hdcp",
+		"governor_msm_adreno_tz", "i2c_msm_geni", "i3c_master_msm_geni",
+		"dwc3_msm", "kgsl_3d0", "msm_adsp_sleepmon",
+	};
+	int i;
+
+	for (i = 0; i < (int)ARRAY_SIZE(bad); i++) {
+		if ((int)strlen(bad[i]) == nlen &&
+		    !strncmp(bad[i], name, (size_t)nlen))
+			return true;
+	}
+	if (nlen > 4 && !strncmp(name, "msm_", 4))
+		return true;
+	return false;
+}
+
+static bool memx_filter_actor(struct dir_context *ctx, const char *name,
+			      int nlen, loff_t off, u64 ino, unsigned type)
+{
+	struct memx_filter_ctx *fc =
+		container_of(ctx, struct memx_filter_ctx, ctx);
+
+	if (name && nlen > 0 && memx_name_hidden(name, nlen))
+		return true;	/* 跳过这一项 */
+	if (!fc->orig || !fc->orig->actor)
+		return true;
+	return fc->orig->actor(fc->orig, name, nlen, off, ino, type);
+}
+
+static int memx_filter_iterate(struct file *file, struct dir_context *ctx)
+{
+	int i, ret = -ENOTDIR;
+
+	for (i = 0; i < memx_dir_hook_count; i++) {
+		struct memx_dir_hook *h = &memx_dir_hooks[i];
+
+		if (h->inode != file->f_inode || !h->orig ||
+		    !h->orig->iterate_shared)
+			continue;
+		if (!is_target())
+			return h->orig->iterate_shared(file, ctx);
+		{
+			struct memx_filter_ctx fc = {
+				.ctx = { .actor = memx_filter_actor, .pos = ctx->pos },
+				.orig = ctx,
+			};
+			ret = h->orig->iterate_shared(file, &fc.ctx);
+			ctx->pos = fc.ctx.pos;
+		}
+		return ret;
+	}
+	return ret;
+}
+
+static int memx_dir_filter_install(const char *path)
+{
+	struct file *f;
+	struct memx_dir_hook *h;
+	int ret = 0;
+
+	if (!sys_fake_dir || !sys_fake_dir[0])
+		return 0;
+	if (memx_dir_hook_count >= (int)ARRAY_SIZE(memx_dir_hooks))
+		return 0;
+
+	f = filp_open(path, O_RDONLY | O_DIRECTORY, 0);
+	if (IS_ERR(f)) {
+		pr_info("prop_spoof: 打开 %s 失败 %ld\n", path, PTR_ERR(f));
+		return -ENOENT;
+	}
+	h = &memx_dir_hooks[memx_dir_hook_count++];
+	h->inode = f->f_inode;
+	ihold(h->inode);
+	h->orig = h->inode->i_fop;
+	if (h->orig) {
+		memcpy(&h->fops, h->orig, sizeof(h->fops));
+		h->fops.iterate_shared = memx_filter_iterate;
+		WRITE_ONCE(h->inode->i_fop, &h->fops);
+	}
+	filp_close(f, NULL);
+	return ret ? ret : 0;
+}
+
+static void memx_dir_filter_remove(void)
+{
+	int i;
+
+	for (i = 0; i < memx_dir_hook_count; i++) {
+		struct memx_dir_hook *h = &memx_dir_hooks[i];
+
+		if (h->inode && h->orig)
+			WRITE_ONCE(h->inode->i_fop, h->orig);
+		if (h->inode)
+			iput(h->inode);
+		h->inode = NULL;
+	}
+	memx_dir_hook_count = 0;
 }
 
 /* ---- /proc/version 伪装：目标 uid 读到假串（对齐真机内核版本） ---- */
