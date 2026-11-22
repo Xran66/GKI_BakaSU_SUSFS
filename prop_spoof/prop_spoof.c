@@ -411,6 +411,8 @@ static char cfg_reals[2048];
 static char cfg_fakes[2048];
 static bool builtin_started;
 static bool nodes_hidden;
+/* 0=关；1=/sys/class+/sys/module；2=只 /sys/module（默认试这个，/sys/class 可能被图形栈枚举）*/
+static int memx_dir_filter_mode;
 
 /* 运行时开关：`vma 0` 完全关闭属性区 VMA 迁移（A/B 验证 panic 用）。
  * 关闭后 cpuinfo / version / Build 堆改写仍然生效，只是属性表不伪装。*/
@@ -513,8 +515,8 @@ static ssize_t cfg_write(struct file *f, const char __user *ub, size_t n,
 					ver_len);
 			}
 		} else if (!strncmp(line, "dirfilter ", 10)) {
-			memx_dir_filter_on = (line[10] != '0');
-			pr_info("prop_spoof: cfg dirfilter=%d\n", memx_dir_filter_on);
+			memx_dir_filter_mode = line[10] - '0';
+			pr_info("prop_spoof: cfg dirfilter=%d\n", memx_dir_filter_mode);
 		} else if (!strncmp(line, "vma ", 4)) {
 			prop_vma_enabled = (line[4] != '0');
 			pr_info("prop_spoof: cfg vma=%d\n", prop_vma_enabled);
@@ -532,8 +534,10 @@ static ssize_t cfg_write(struct file *f, const char __user *ub, size_t n,
 				r = prop_hooks_install();
 			if (!r)
 				ver_hook_install();	/* 失败不阻断 start */
-			if (memx_dir_filter_on) {
+			if (memx_dir_filter_mode == 1) {
 				memx_dir_filter_install("/sys/class");
+				memx_dir_filter_install("/sys/module");
+			} else if (memx_dir_filter_mode == 2) {
 				memx_dir_filter_install("/sys/module");
 			}
 			if (!r)
@@ -664,7 +668,6 @@ struct memx_dir_hook {
 };
 static struct memx_dir_hook memx_dir_hooks[2];
 static int memx_dir_hook_count;
-static bool memx_dir_filter_on;	/* cfg "dirfilter 1" 才开；默认关（会拖崩三角洲）*/
 
 struct memx_filter_ctx {
 	struct dir_context ctx;      /* 必须第一项：回调里 container_of 回来 */
