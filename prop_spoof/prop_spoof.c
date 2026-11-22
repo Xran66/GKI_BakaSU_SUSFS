@@ -782,6 +782,42 @@ __maybe_unused static void memx_dir_filter_remove(void)
 	memx_dir_hook_count = 0;
 }
 
+/* ==================================================================
+ * /proc/<pid>/maps 过滤：目标 uid 看不到 adreno/kgsl 的映射行
+ *
+ * 为什么必须在这一层：vivo 的 zygote 预加载了 adreno，app 是 fork 的，
+ * 映射直接继承。NoMount 的 whiteout 只拦 open 路径，拦不住已经在内存里的
+ * 映射 —— 所以文件、属性都能改成 mali，maps 里仍然是
+ * "/vendor/lib64/egl/libGLESv2_adreno.so (deleted)"。
+ *
+ * 挂在 fs/proc/task_mmu.c 的 show_map_vma() 开头（弱符号调用，非本配置
+ * 编译时自动退化为不过滤）：
+ *     if (prop_spoof_hide_map && prop_spoof_hide_map(vma)) return 0;
+ * ================================================================== */
+bool prop_spoof_hide_map(struct vm_area_struct *vma)
+{
+	struct file *f;
+	char *buf, *path;
+	bool hit = false;
+
+	if (!is_target())
+		return false;
+	if (!vma || !vma->vm_file)
+		return false;
+	f = vma->vm_file;
+	buf = kmalloc(PATH_MAX, GFP_ATOMIC);
+	if (!buf)
+		return false;
+	path = d_path(&f->f_path, buf, PATH_MAX);
+	if (!IS_ERR_OR_NULL(path)) {
+		if (strstr(path, "adreno") || strstr(path, "kgsl") ||
+		    strstr(path, "q3dtools") || strstr(path, "libgsl"))
+			hit = true;
+	}
+	kfree(buf);
+	return hit;
+}
+
 /* ---- /proc/version 伪装：目标 uid 读到假串（对齐真机内核版本） ---- */
 static struct proc_dir_entry *find_proc_pde(const char *want);
 

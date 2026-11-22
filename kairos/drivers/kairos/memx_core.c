@@ -232,7 +232,8 @@ static int memx_boot_tries = 4;	/* 错峰 spawn 次数 */
 module_param_named(boot_retries, memx_boot_tries, int, 0444);
 
 static struct delayed_work memx_boot_work;
-static struct work_struct mem/*
+static struct work_struct memx_boot_work_dummy;
+/*
  * 开机脚本执行：学 KernelSU 的做法 —— 等 zygote 起来那一刻再 spawn。
  *
  * 为什么之前怎么都不行：
@@ -287,11 +288,6 @@ static int memx_exec_pre(struct kprobe *p, struct pt_regs *regs)
 		schedule_work(&memx_boot_work_dummy);
 	}
 	return 0;
-}
-
-);
-	else
-		WRITE_ONCE(memx_boot_done, true);
 }
 
 /* ================================================================== */

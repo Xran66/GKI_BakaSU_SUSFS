@@ -776,6 +776,18 @@ jobs:
               echo "临时调整 Android 15 6.6 task_mmu.c 上下文"
               sed -i '/smap_gather_stats(vma, &mss, last_vma_end);/a\last_vma_end = vma->vm_end;' fs/proc/task_mmu.c
             fi
+            # maps 过滤钩子：prop_spoof 按 uid 隐藏 adreno/kgsl 的映射行
+            # （zygote 预加载的 adreno 会随 fork 继承，whiteout 拦不住，只能在
+            #   /proc/<pid>/maps 的输出里滤掉）
+            if ! grep -q 'prop_spoof_hide_map' fs/proc/task_mmu.c; then
+              if grep -q '^static int show_map_vma(struct seq_file \*m, struct vm_area_struct \*vma)$' fs/proc/task_mmu.c; then
+                sed -i 's|^static int show_map_vma(struct seq_file \*m, struct vm_area_struct \*vma)$|extern bool prop_spoof_hide_map(struct vm_area_struct *vma) __attribute__((weak));\nstatic int show_map_vma(struct seq_file *m, struct vm_area_struct *vma)|' fs/proc/task_mmu.c
+                sed -i '/^static int show_map_vma(struct seq_file \*m, struct vm_area_struct \*vma)$/,/^{$/ s|^{$|{\n\tif (prop_spoof_hide_map \&\& prop_spoof_hide_map(vma))\n\t\treturn 0;|' fs/proc/task_mmu.c
+                echo "已注入 maps 过滤钩子"
+              else
+                echo "::warning::task_mmu.c 未匹配 show_map_vma，maps 过滤未注入"
+              fi
+            fi
             if [[ "$CURRENT_SUB" -le 92 ]] && ! grep -qF '#include <linux/dma-buf.h>' fs/proc/base.c; then
               echo "临时调整 Android 15 6.6 base.c 上下文"
               sed -i '/^#include <linux\/cpufreq_times.h>$/a #include <linux/dma-buf.h>' fs/proc/base.c
