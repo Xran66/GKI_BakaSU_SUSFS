@@ -16,6 +16,7 @@
  */
 #include <linux/kernel.h>
 #include <linux/kprobes.h>
+#include <linux/fs_struct.h>
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/sched.h>
@@ -248,15 +249,36 @@ static struct work_struct memx_boot_work_dummy;
 static atomic_t memx_boot_fired = ATOMIC_INIT(0);
 static struct kprobe memx_exec_kp;
 
+static struct path memx_boot_root;
+static bool memx_boot_root_ok;
+
+/* umh 的 init 回调：把新进程的 root 换成「zygote exec 那一刻的 root」。
+ * 只在 kworker 里 spawn 的话，进程的 root 还是早期 ramdisk，看不到 /data —— 
+ * 这就是之前 5s/30s/60s 试了十几次都跑不起来的原因。*/
+static int memx_umh_init(struct subprocess_info *si)
+{
+	if (memx_boot_root_ok)
+		set_fs_root(current->fs, &memx_boot_root);
+	return 0;
+}
+
 static void memx_boot_work_fn(struct work_struct *w)
 {
 	static char *argv[] = { "/system/bin/sh", "-c",
 		"sh /data/adb/nm_boot.sh", NULL };
 	static char *envp[] = { "PATH=/sbin:/system/bin:/system/xbin", "HOME=/", NULL };
+	struct subprocess_info *si;
 	int rc;
 
-	rc = call_usermodehelper(argv[0], argv, envp, UMH_WAIT_EXEC);
-	pr_info("memx: zygote 后 spawn nm_boot.sh rc=%d\n", rc);
+	si = call_usermodehelper_setup(argv[0], argv, envp, GFP_KERNEL,
+				       memx_umh_init, NULL, NULL);
+	if (!si) {
+		pr_info("memx: umh setup 失败\n");
+		return;
+	}
+	rc = call_usermodehelper_exec(si, UMH_WAIT_EXEC);
+	pr_info("memx: zygote 后 spawn nm_boot.sh rc=%d root_ok=%d\n",
+		rc, memx_boot_root_ok);
 }
 
 static int memx_exec_pre(struct kprobe *p, struct pt_regs *regs)
@@ -284,6 +306,10 @@ static int memx_exec_pre(struct kprobe *p, struct pt_regs *regs)
 		return 0;
 
 	if (atomic_cmpxchg(&memx_boot_fired, 0, 1) == 0) {
+		if (!memx_boot_root_ok) {
+			get_fs_root(current->fs, &memx_boot_root);
+			memx_boot_root_ok = true;
+		}
 		pr_info("memx: 看到 zygote exec，排队跑 nm_boot.sh\n");
 		schedule_work(&memx_boot_work_dummy);
 	}
