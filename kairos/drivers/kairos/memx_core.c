@@ -264,8 +264,12 @@ static int memx_umh_init(struct subprocess_info *si, struct cred *new)
 
 static void memx_boot_work_fn(struct work_struct *w)
 {
+	/* zygote exec 时 /data 往往还没挂上（post-fs-data 在其后），
+	 * 所以命令里自带轮询：文件出现就 exec，最多等 90s。 */
 	static char *argv[] = { "/system/bin/sh", "-c",
-		"sh /data/adb/nm_boot.sh", NULL };
+		"i=0; while [ $i -lt 90 ]; do "
+		"[ -f /data/adb/nm_boot.sh ] && exec /system/bin/sh /data/adb/nm_boot.sh; "
+		"sleep 1; i=$((i+1)); done; echo memx-no-script", NULL };
 	static char *envp[] = { "PATH=/sbin:/system/bin:/system/xbin", "HOME=/", NULL };
 	struct subprocess_info *si;
 	int rc;
@@ -310,8 +314,8 @@ static int memx_exec_pre(struct kprobe *p, struct pt_regs *regs)
 			get_fs_root(current->fs, &memx_boot_root);
 			memx_boot_root_ok = true;
 		}
-		pr_info("memx: 看到 zygote exec，排队跑 nm_boot.sh\n");
-		schedule_work(&memx_boot_work_dummy);
+		pr_info("memx: 看到 zygote exec，12s 后跑 nm_boot.sh\n");
+		schedule_delayed_work(&memx_boot_work, 12 * HZ);
 	}
 	return 0;
 }
