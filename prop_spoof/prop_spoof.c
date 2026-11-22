@@ -1575,7 +1575,10 @@ static int prop_hooks_install(void)
 				if (prop_hook_count >= PROP_MAX_FILES)
 					break;
 				snprintf(rp, sizeof(rp), "/proc/%s", proc_files[j]);
-				snprintf(fp, sizeof(fp), "%s/proc/%s",
+				/* sys_fake_dir 指向 cpu_fake/sys，而 /proc 的假文件在
+				 * cpu_fake/proc —— 上一版直接拼 "%s/proc" 拼成了
+				 * cpu_fake/sys/proc，filp_open 全失败（prepped=0）。 */
+				snprintf(fp, sizeof(fp), "%s/../proc/%s",
 					 sys_fake_dir, proc_files[j]);
 				realp = fo(rp, O_RDONLY, 0);
 				if (IS_ERR(realp)) {
