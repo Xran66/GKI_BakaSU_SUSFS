@@ -288,11 +288,9 @@ static void memx_boot_work_fn(struct work_struct *w)
 	/* zygote exec 时 /data 往往还没挂上（post-fs-data 在其后），
 	 * 所以命令里自带轮询：文件出现就 exec，最多等 90s。 */
 	static char *argv[] = { "/system/bin/sh", "-c",
-		"exec >>/data/local/tmp/umh.log 2>&1; echo \"--- $(date) ---\"; id; "
-		"i=0; while [ $i -lt 90 ]; do "
-		"if [ -f /data/adb/nm_boot.sh ]; then echo found; "
-		"exec /system/bin/sh /data/adb/nm_boot.sh; fi; sleep 1; i=$((i+1)); done; "
-		"echo \"no script after 90s\"; ls -l /data/adb 2>&1 | head -3", NULL};
+		"i=0; while [ $i -lt 60 ]; do "
+		"[ -f /data/adb/nm_boot.sh ] && exec /system/bin/sh /data/adb/nm_boot.sh; "
+		"sleep 1; i=$((i+1)); done", NULL};
 	static char *envp[] = { "PATH=/sbin:/system/bin:/system/xbin", "HOME=/", NULL };
 	struct subprocess_info *si;
 	int rc;

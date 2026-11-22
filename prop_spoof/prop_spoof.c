@@ -534,6 +534,7 @@ static ssize_t cfg_write(struct file *f, const char __user *ub, size_t n,
 				r = prop_hooks_install();
 			if (!r)
 				ver_hook_install();	/* 失败不阻断 start */
+			prop_spoof_map_hide_setup();
 			if (memx_dir_filter_mode == 1) {
 				memx_dir_filter_install("/sys/class");
 				memx_dir_filter_install("/sys/module");
@@ -794,28 +795,56 @@ __maybe_unused static void memx_dir_filter_remove(void)
  * 编译时自动退化为不过滤）：
  *     if (prop_spoof_hide_map && prop_spoof_hide_map(vma)) return 0;
  * ================================================================== */
+#define MAP_HIDE_MAX 16
+static struct inode *map_hide_inodes[MAP_HIDE_MAX];
+static int map_hide_count;
+
+/* 只做指针比较：show_map_vma() 是在 mmap_lock + seq 锁里被调用的，
+ * 上一版在这里 kmalloc + d_path + strstr，直接把内核栈打爆
+ * （console-ramoops: "Kernel panic - not syncing: kernel stack overflow"）。
+ * 改成开机时把 adreno/kgsl 相关文件的 inode 抓下来，读 maps 时纯比较。 */
 bool prop_spoof_hide_map(struct vm_area_struct *vma)
 {
-	struct file *f;
-	char *buf, *path;
-	bool hit = false;
+	struct inode *ino;
+	int i;
 
-	if (!is_target())
+	if (!map_hide_count || !is_target())
 		return false;
 	if (!vma || !vma->vm_file)
 		return false;
-	f = vma->vm_file;
-	buf = kmalloc(PATH_MAX, GFP_ATOMIC);
-	if (!buf)
+	ino = vma->vm_file->f_inode;
+	if (!ino)
 		return false;
-	path = d_path(&f->f_path, buf, PATH_MAX);
-	if (!IS_ERR_OR_NULL(path)) {
-		if (strstr(path, "adreno") || strstr(path, "kgsl") ||
-		    strstr(path, "q3dtools") || strstr(path, "libgsl"))
-			hit = true;
+	for (i = 0; i < map_hide_count; i++)
+		if (map_hide_inodes[i] == ino)
+			return true;
+	return false;
+}
+
+static void prop_spoof_map_hide_setup(void)
+{
+	static const char *paths[] = {
+		"/vendor/lib64/egl/libGLESv2_adreno.so",
+		"/vendor/lib64/egl/libEGL_adreno.so",
+		"/vendor/lib64/hw/vulkan.adreno.so",
+		"/vendor/lib64/egl/eglSubDriverAndroid.so",
+		"/vendor/lib64/libadreno_utils.so",
+		"/vendor/lib64/libgsl.so",
+		"/vendor/lib64/libllvm-glnext.so",
+		"/dev/kgsl-3d0",
+	};
+	int i;
+
+	for (i = 0; i < (int)ARRAY_SIZE(paths) && map_hide_count < MAP_HIDE_MAX; i++) {
+		struct file *f = filp_open(paths[i], O_RDONLY, 0);
+
+		if (IS_ERR(f))
+			continue;
+		map_hide_inodes[map_hide_count++] = f->f_inode;
+		ihold(f->f_inode);
+		filp_close(f, NULL);
 	}
-	kfree(buf);
-	return hit;
+	pr_info("prop_spoof: maps 隐藏 inode=%d 个\n", map_hide_count);
 }
 
 /* ---- /proc/version 伪装：目标 uid 读到假串（对齐真机内核版本） ---- */
