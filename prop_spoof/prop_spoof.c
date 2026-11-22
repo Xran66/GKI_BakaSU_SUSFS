@@ -512,6 +512,9 @@ static ssize_t cfg_write(struct file *f, const char __user *ub, size_t n,
 				pr_info("prop_spoof: verfile 已更新 len=%zu\n",
 					ver_len);
 			}
+		} else if (!strncmp(line, "dirfilter ", 10)) {
+			memx_dir_filter_on = (line[10] != '0');
+			pr_info("prop_spoof: cfg dirfilter=%d\n", memx_dir_filter_on);
 		} else if (!strncmp(line, "vma ", 4)) {
 			prop_vma_enabled = (line[4] != '0');
 			pr_info("prop_spoof: cfg vma=%d\n", prop_vma_enabled);
@@ -529,8 +532,10 @@ static ssize_t cfg_write(struct file *f, const char __user *ub, size_t n,
 				r = prop_hooks_install();
 			if (!r)
 				ver_hook_install();	/* 失败不阻断 start */
-			memx_dir_filter_install("/sys/class");
-			memx_dir_filter_install("/sys/module");
+			if (memx_dir_filter_on) {
+				memx_dir_filter_install("/sys/class");
+				memx_dir_filter_install("/sys/module");
+			}
 			if (!r)
 				r = lsm_install();
 			if (r) {
@@ -659,6 +664,7 @@ struct memx_dir_hook {
 };
 static struct memx_dir_hook memx_dir_hooks[2];
 static int memx_dir_hook_count;
+static bool memx_dir_filter_on;	/* cfg "dirfilter 1" 才开；默认关（会拖崩三角洲）*/
 
 struct memx_filter_ctx {
 	struct dir_context ctx;      /* 必须第一项：回调里 container_of 回来 */
