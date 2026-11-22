@@ -395,6 +395,7 @@ static const struct proc_ops ctrl_ops = {
 #ifdef PROP_SPOOF_BUILTIN
 /* 前向声明（这些实体定义在本文件后部） */
 static int memx_dir_filter_install(const char *path);
+static void prop_spoof_map_hide_setup(void);
 static int hook_install(void);
 static int prop_hooks_install(void);
 static int lsm_install(void);
