@@ -665,22 +665,27 @@ struct memx_filter_ctx {
 	struct dir_context *orig;
 };
 
+static bool memx_name_has(const char *name, int nlen, const char *needle)
+{
+	int i, m = (int)strlen(needle);
+
+	if (m <= 0 || nlen < m)
+		return false;
+	for (i = 0; i + m <= nlen; i++)
+		if (!strncmp(name + i, needle, (size_t)m))
+			return true;
+	return false;
+}
+
 static bool memx_name_hidden(const char *name, int nlen)
 {
-	static const char *bad[] = {
-		"kgsl", "adreno", "msm_drm", "msm_dma_iommu_mapping",
-		"msm_geni_serial", "msm_ion", "msm_sps", "msm_hdcp",
-		"governor_msm_adreno_tz", "i2c_msm_geni", "i3c_master_msm_geni",
-		"dwc3_msm", "kgsl_3d0", "msm_adsp_sleepmon",
-	};
-	int i;
-
-	for (i = 0; i < (int)ARRAY_SIZE(bad); i++) {
-		if ((int)strlen(bad[i]) == nlen &&
-		    !strncmp(bad[i], name, (size_t)nlen))
-			return true;
-	}
-	if (nlen > 4 && !strncmp(name, "msm_", 4))
+	/* 子串匹配：pci_msm_drv / phy_msm_* / qcrypto_msm_dlkm 这些
+	 * "msm" 不在开头，白名单式前缀匹配会漏。 */
+	if (memx_name_has(name, nlen, "msm"))
+		return true;
+	if (memx_name_has(name, nlen, "adreno"))
+		return true;
+	if (memx_name_has(name, nlen, "kgsl"))
 		return true;
 	return false;
 }
