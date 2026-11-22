@@ -1392,9 +1392,9 @@ static int lsm_file_open(struct file *file)
 #ifdef PROP_SPOOF_TRACE
 	/* 调试检测版：对目标 uid 记录全部 open 路径（限 4000 条防爆日志） */
 	if (file && file->f_path.dentry && is_target()) {
-		static int trace_n;
-		char tp[224], *pp;
-		if (trace_n < 4000) {
+		static int trace_n;	/* 调试日志：默认关闭 */
+		if (0) {
+
 			pp = dentry_path_raw(file->f_path.dentry, tp, sizeof(tp));
 			if (!IS_ERR(pp)) {
 				trace_n++;

@@ -268,7 +268,7 @@ static int memx_umh_init(struct subprocess_info *si, struct cred *new)
 	init_tsk = pid_task(find_get_pid(1), PIDTYPE_PID);
 	if (init_tsk) {
 		rcu_read_lock();
-		ns = task_nsproxy(init_tsk);
+		ns = init_tsk->nsproxy;	/* 6.6 没有 task_nsproxy() 了 */
 		if (ns)
 			get_nsproxy(ns);
 		rcu_read_unlock();
