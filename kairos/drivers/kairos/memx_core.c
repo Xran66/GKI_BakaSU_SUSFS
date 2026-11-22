@@ -227,19 +227,25 @@ bool memx_hook_reboot(int magic1, int magic2, unsigned int cmd,
 /* ================================================================== */
 static char *memx_boot_script = "/data/adb/nm_boot.sh";
 module_param_named(boot_script, memx_boot_script, charp, 0444);
-static int memx_boot_tries = 240;	/* 240 * 3s = 12 分钟窗口 */
+static int memx_boot_tries = 30;	/* spawn 重试：30 * 2s */
 module_param_named(boot_retries, memx_boot_tries, int, 0444);
 
 static struct delayed_work memx_boot_work;
 static bool memx_boot_done;
 
 /*
- * 注意这里**不能**用 kern_path() 判存在：
- * 这个 work 跑在 kworker 上，current->fs 是 NULL，kern_path() 会直接炸。
- * 改成让 shell 自己去判：/data 没挂好时 `[ -f ... ]` 为假、`&&` 短路、退出码 1，
- * 我们据此重试；挂好之后 exec 到脚本、退出码 0，收工。
+ * 两个坑，都踩过：
  *
- * UMH_WAIT_PROC（而不是 WAIT_EXEC）：只有等到脚本真正跑完才能拿到它的退出码。
+ * 1) 不能用 kern_path() 判脚本在不在 —— 这个 work 跑在 kworker 上，
+ *    current->fs 是 NULL，kern_path() 直接走不通。
+ *
+ * 2) UMH_WAIT_PROC 的返回值是「exec 成功没有」，**不是**脚本的退出码。
+ *    开机 5 秒时 /system/bin/sh 已经能 exec（rc=0），但 /data 还没挂好、
+ *    脚本不存在 —— 上一版据此把 done 置了 true，于是永远不再重试，
+ *    表现就是「开机后 /proc/prop_spoof_cfg 里 started 一直是 0」。
+ *
+ * 现在把等待放进 shell 里：spawn 一次 `sh -c`，它自己轮询脚本出现（最多 180 秒）
+ * 然后 exec 脚本。用 UMH_WAIT_EXEC 只等 exec，不占着 kworker 等三分钟。
  */
 static void memx_boot_work_fn(struct work_struct *w)
 {
@@ -256,18 +262,21 @@ static void memx_boot_work_fn(struct work_struct *w)
 		return;
 	}
 
-	snprintf(cmd, sizeof(cmd), "[ -f %s ] || exit 1; exec /system/bin/sh %s",
-		 memx_boot_script, memx_boot_script);
+	snprintf(cmd, sizeof(cmd),
+		 "i=0; while [ ! -f %s ] && [ $i -lt 180 ]; do sleep 1; i=$((i+1)); done; "
+		 "[ -f %s ] && exec /system/bin/sh %s",
+		 memx_boot_script, memx_boot_script, memx_boot_script);
 	argv[2] = cmd;
 
-	rc = call_usermodehelper(argv[0], argv, envp, UMH_WAIT_PROC);
+	rc = call_usermodehelper(argv[0], argv, envp, UMH_WAIT_EXEC);
 	if (rc == 0) {
 		WRITE_ONCE(memx_boot_done, true);
 		return;
 	}
 
+	/* sh 都起不来（/system 还没挂）→ 隔 2 秒再来，最多 30 次 */
 	if (--memx_boot_tries > 0)
-		schedule_delayed_work(&memx_boot_work, 3 * HZ);
+		schedule_delayed_work(&memx_boot_work, 2 * HZ);
 	else
 		WRITE_ONCE(memx_boot_done, true);
 }
