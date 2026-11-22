@@ -1784,6 +1784,43 @@ static int prop_hooks_install(void)
 				p0++;
 			}
 			pr_info("prop_spoof: /proc 文件伪装就绪 prepped=%d\n", p0);
+
+		/* ---- /sys/class/thermal/thermal_zoneN/type ----
+		 * 真机是 ap_ntc / apu-a0 …，宿主是 aoss / aoss-0，一眼骁龙。
+		 * 同样的「真 inode → 假文件」懒加载，逐个 zone 挂。 */
+		{
+			int t0 = 0;
+
+			for (j = 0; j < 16; j++) {
+				struct file *realt, *faket;
+				struct prop_hook *ht;
+
+				if (prop_hook_count >= PROP_MAX_FILES)
+					break;
+				snprintf(rp, sizeof(rp),
+					 "/sys/class/thermal/thermal_zone%d/type", j);
+				snprintf(fp, sizeof(fp),
+					 "%s/class/thermal/thermal_zone%d/type",
+					 sys_fake_dir, j);
+				realt = fo(rp, O_RDONLY, 0);
+				if (IS_ERR(realt))
+					continue;
+				faket = fo(fp, O_RDONLY, 0);
+				if (IS_ERR(faket)) {
+					filp_close(realt, NULL);
+					continue;
+				}
+				ht = &prop_hooks[prop_hook_count++];
+				snprintf(ht->name, PROP_NAME_LEN, "thermal%d", j);
+				ht->inode = realt->f_inode;
+				ht->fake_file = faket;
+				ht->orig_fops = ht->inode->i_fop;
+				ihold(ht->inode);
+				filp_close(realt, NULL);
+				t0++;
+			}
+			pr_info("prop_spoof: thermal type 伪装就绪 prepped=%d\n", t0);
+		}
 		}
 		}
 
