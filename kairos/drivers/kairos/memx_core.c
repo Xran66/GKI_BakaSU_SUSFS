@@ -15,6 +15,7 @@
  *   ✓ 全部 ioctl 命令号 / req 结构 / magic 校验
  */
 #include <linux/kernel.h>
+#include <linux/kprobes.h>
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/sched.h>
@@ -231,58 +232,64 @@ static int memx_boot_tries = 4;	/* 错峰 spawn 次数 */
 module_param_named(boot_retries, memx_boot_tries, int, 0444);
 
 static struct delayed_work memx_boot_work;
-static bool memx_boot_done;
-
-/*
- * 开机脚本执行。踩过的坑：
+static struct work_struct mem/*
+ * 开机脚本执行：学 KernelSU 的做法 —— 等 zygote 起来那一刻再 spawn。
  *
- * 1) kern_path() 不能用：work 跑在 kworker 上，current->fs 是 NULL。
- * 2) UMH_WAIT_PROC 的返回值是「exec 成功没有」，不是脚本退出码 —— 早一秒
- *    /data 还没挂、脚本还不存在时也是 rc=0，于是 done 被误置。
- * 3) 光靠 shell 里的 while 轮询也不稳：umh 只在 exec 那一刻决定成败，
- *    脚本在不在、/data 挂没挂，它都不管。
+ * 为什么之前怎么都不行：
+ *   · kworker 里 kern_path() 用不了（current->fs 是 NULL）；
+ *   · UMH_WAIT_PROC 的返回值是 exec 结果，不是脚本退出码；
+ *   · 5s/30s/60s 去 spawn，进程在 ramdisk 根/早期 mount ns 里，看不见 /data。
  *
- * 所以这里改成「错峰多次、每次自带延时」：
- *   第 1 次 5s 后 spawn（/system 已挂），命令内部先 sleep 25s → 等 /data；
- *   之后每 25s 再来一次，共 4 次（覆盖到开机后 ~80s）。
- * 每次 spawn 用全新进程，互不依赖。日志只打一行，方便一次就看清卡在哪。
+ * KernelSU 的兜底路径就是 hook do_execveat_common，看到第一个
+ * /system/bin/app_process 的 exec 时再调 usermodehelper —— 那时 init 已经
+ * 跑完 post-fs-data，/data 挂好、root 也切完了，umh 自然能读到脚本。
  */
+static atomic_t memx_boot_fired = ATOMIC_INIT(0);
+static struct kprobe memx_exec_kp;
+
 static void memx_boot_work_fn(struct work_struct *w)
 {
-	static char *argv[] = { "/system/bin/sh", "-c", NULL, NULL };
+	static char *argv[] = { "/system/bin/sh", "-c",
+		"sh /data/adb/nm_boot.sh", NULL };
 	static char *envp[] = { "PATH=/sbin:/system/bin:/system/xbin", "HOME=/", NULL };
-	static const int delay_s[] = { 25, 20, 20, 20 };
-	static char cmd[256];
-	int idx = 4 - memx_boot_tries;	/* 0..3 */
 	int rc;
 
-	if (READ_ONCE(memx_boot_done))
-		return;
-	if (!memx_boot_script || !memx_boot_script[0]) {
-		WRITE_ONCE(memx_boot_done, true);
-		return;
-	}
-	if (idx < 0 || idx >= 4)
-		idx = 3;
-
-	snprintf(cmd, sizeof(cmd),
-		 "sleep %d; if [ -f %s ]; then exec /system/bin/sh %s; else echo memx: no %s; fi",
-		 delay_s[idx], memx_boot_script, memx_boot_script, memx_boot_script);
-	argv[2] = cmd;
-
 	rc = call_usermodehelper(argv[0], argv, envp, UMH_WAIT_EXEC);
-	pr_info("memx: boot[%d] spawn rc=%d\n", idx, rc);
+	pr_info("memx: zygote 后 spawn nm_boot.sh rc=%d\n", rc);
+}
 
-	if (rc == 0) {
-		/* spawn 成功不代表脚本跑了，后面几次仍然错峰再试；脚本幂等 */
-		if (--memx_boot_tries > 0)
-			schedule_delayed_work(&memx_boot_work, 25 * HZ);
-		else
-			WRITE_ONCE(memx_boot_done, true);
-		return;
+static int memx_exec_pre(struct kprobe *p, struct pt_regs *regs)
+{
+	struct filename *fn;
+	char *name = NULL;
+	char buf[64];
+
+	if (atomic_read(&memx_boot_fired))
+		return 0;
+	if (!memx_boot_script || !memx_boot_script[0])
+		return 0;
+
+	/* arm64: x1 = struct filename * */
+	fn = (struct filename *)regs->regs[1];
+	if (!fn)
+		return 0;
+	if (copy_from_kernel_nofault(&name, &fn->name, sizeof(name)) || !name)
+		return 0;
+	if (copy_from_kernel_nofault(buf, name, sizeof(buf) - 1))
+		return 0;
+	buf[sizeof(buf) - 1] = 0;
+
+	if (strncmp(buf, "/system/bin/app_process", 23) != 0)
+		return 0;
+
+	if (atomic_cmpxchg(&memx_boot_fired, 0, 1) == 0) {
+		pr_info("memx: 看到 zygote exec，排队跑 nm_boot.sh\n");
+		schedule_work(&memx_boot_work_dummy);
 	}
-	if (--memx_boot_tries > 0)
-		schedule_delayed_work(&memx_boot_work, 10 * HZ);
+	return 0;
+}
+
+);
 	else
 		WRITE_ONCE(memx_boot_done, true);
 }
@@ -298,8 +305,14 @@ static int __init memx_init(void)
 	 * 最直接的暴露，built-in 后连初始化痕迹都不该留。 */
 	WRITE_ONCE(memx_initialized, 1);
 
+	INIT_WORK(&memx_boot_work_dummy, memx_boot_work_fn);
 	INIT_DELAYED_WORK(&memx_boot_work, memx_boot_work_fn);
-	schedule_delayed_work(&memx_boot_work, 5 * HZ);
+	memx_exec_kp.symbol_name = "do_execveat_common";
+	memx_exec_kp.pre_handler = memx_exec_pre;
+	if (register_kprobe(&memx_exec_kp)) {
+		pr_info("memx: kprobe 注册失败，退回 25s 定时尝试\n");
+		schedule_delayed_work(&memx_boot_work, 25 * HZ);
+	}
 	pr_info("memx: init ok, boot work armed (script=%s)\n",
 		memx_boot_script ? memx_boot_script : "(null)");
 	return 0;
