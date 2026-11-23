@@ -814,15 +814,34 @@ static int map_hide_count;
  * 改成开机时把 adreno/kgsl 相关文件的 inode 抓下来，读 maps 时纯比较。 */
 bool prop_spoof_hide_map(struct vm_area_struct *vma)
 {
+	const char *n;
 	struct inode *ino;
 	int i;
 
-	if (!map_hide_count || !is_target())
+	if (!is_target())
 		return false;
-	if (!vma || !vma->vm_file)
+	if (!vma || !vma->vm_file || !vma->vm_file->f_path.dentry)
 		return false;
+	/* 名字匹配（无分配、无大栈缓冲——上一版 d_path+strstr 打爆栈的教训）。
+	 * dentry 名对 "(deleted)" 变体同样命中（后缀是 maps 打印时加的）。 */
+	n = vma->vm_file->f_path.dentry->d_name.name;
+	if (n) {
+		if (strstr(n, "adreno"))
+			return true;
+		if (strstr(n, "kgsl"))
+			return true;
+		if (strstr(n, "libgsl"))
+			return true;
+		if (strstr(n, "llvm-glnext"))
+			return true;
+		if (strstr(n, "q3dtools"))
+			return true;
+		if (strstr(n, "eglSubDriver"))
+			return true;
+	}
+	/* 兜底：开机抓的 inode 表（覆盖改名/换路径的场景） */
 	ino = vma->vm_file->f_inode;
-	if (!ino)
+	if (!ino || !map_hide_count)
 		return false;
 	for (i = 0; i < map_hide_count; i++)
 		if (map_hide_inodes[i] == ino)
