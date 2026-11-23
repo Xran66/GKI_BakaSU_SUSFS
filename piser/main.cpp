@@ -141,8 +141,55 @@ static int pa_write(const std::vector<std::pair<std::string, std::string>>& prop
     of.write(hdr, PA_HEADER);
     of.write(buf.data(), buf.size());
     of.close();
-    std::cout << "parea props=" << props.size() << " bytes_used=" << bytes_used << "\n";
-    return 0;
+    // 自检: 按 bionic find_property 算法走查每个键
+    int ok = 0, bad = 0;
+    for (auto& kv : props) {
+        std::vector<char> rd = buf;
+        char* hdr2 = hdr;
+        (void)hdr2;
+        uint32_t cur = 0;   // root
+        size_t pos = 0;
+        bool okk = true;
+        while (true) {
+            size_t sep = kv.first.find('.', pos);
+            std::string seg = (sep == std::string::npos)
+                ? kv.first.substr(pos) : kv.first.substr(pos, sep - pos);
+            if (seg.empty()) { okk = false; break; }
+            uint32_t children;
+            memcpy(&children, rd.data() + cur + 16, 4);
+            if (children == 0) { okk = false; break; }
+            // BST walk
+            uint32_t node = children; uint32_t found = 0;
+            while (node != 0 && node + 20 + 1 < rd.size()) {
+                uint32_t nl; memcpy(&nl, rd.data() + node, 4);
+                if (nl > 92) { okk = false; break; }
+                std::string nm(rd.data() + node + 20, nl);
+                int ret;
+                if (seg.size() < nm.size()) ret = -1;
+                else if (seg.size() > nm.size()) ret = 1;
+                else ret = seg.compare(nm);
+                if (ret == 0) { found = node; break; }
+                uint32_t nxt;
+                memcpy(&nxt, rd.data() + node + (ret < 0 ? 8 : 12), 4);
+                if (nxt == 0 || nxt >= rd.size()) { okk = false; break; }
+                node = nxt;
+            }
+            if (!okk || found == 0) { if (!okk) break; okk = false; break; }
+            cur = found;
+            if (sep == std::string::npos) break;
+            pos = sep + 1;
+        }
+        if (!okk) { bad++; continue; }
+        uint32_t po; memcpy(&po, rd.data() + cur + 4, 4);
+        if (po == 0 || po + 96 + kv.first.size() + 1 > rd.size()) { bad++; continue; }
+        uint32_t serial; memcpy(&serial, rd.data() + po, 4);
+        std::string val(rd.data() + po + 4, (serial >> 24) & 0xff);
+        std::string nm2(rd.data() + po + 96, kv.first.size());
+        if (val == kv.second && nm2 == kv.first) ok++; else bad++;
+    }
+    std::cout << "parea props=" << props.size() << " bytes_used=" << bytes_used
+              << " selfcheck=" << ok << "/" << (ok + bad) << "\n";
+    return bad > 0 ? 5 : 0;
 }
 
 int main(int argc, char** argv) {
