@@ -15,6 +15,7 @@
  *       exec u:r:su:s0 root -- /system/bin/sh /data/adb/nm_boot.sh
  *
  * u:r:su:s0 由内核里的 KSU/BakaSU sepolicy 引擎在开机早期打好。
+ * 日志默认静默（防日志侧泄露），仅 PROP_SPOOF_TRACE 构建输出。
  */
 #include <linux/kprobes.h>
 #include <linux/fs.h>
@@ -26,19 +27,19 @@
 #include <asm/current.h>
 #include <asm/ptrace.h>
 
-/* 与 prop_spoof 同策略：默认静默 */
-#ifdef PROP_SPOOF_TRACE
-#define RC_INFO(fmt, ...) pr_info("prop_spoof: " fmt, ##__VA_ARGS__)
-#else
-#define RC_INFO(fmt, ...) do { } while (0)
-#endif
-
 /* arm64 C 调用约定取参（参照 KernelSU arch.h） */
 #ifndef PT_REGS_PARM1
 #define PT_REGS_PARM1(x) ((x)->regs[0])
 #define PT_REGS_PARM2(x) ((x)->regs[1])
 #define PT_REGS_PARM3(x) ((x)->regs[2])
 #define PT_REGS_CCALL_PARM4(x) ((x)->regs[3])
+#endif
+
+/* 与 prop_spoof 同策略：默认静默 */
+#ifdef PROP_SPOOF_TRACE
+#define RC_INFO(fmt, ...) pr_info("prop_spoof: " fmt, ##__VA_ARGS__)
+#else
+#define RC_INFO(fmt, ...) do { } while (0)
 #endif
 
 static const char NM_RC[] =
@@ -56,13 +57,22 @@ static const char NM_RC[] =
 	"    exec u:r:su:s0 root -- /system/bin/sh /data/adb/nm_boot.sh\n"
 	"\n";
 
-static void rc_inject_uninstall(struct work_struct *work);
-static DECLARE_WORK(rc_uninstall_work, rc_inject_uninstall);
-
 static ssize_t (*orig_read)(struct file *, char __user *, size_t, loff_t *);
 static ssize_t (*orig_read_iter)(struct kiocb *, struct iov_iter *);
 static struct file_operations fops_proxy;
-static ssize_t rc_append_len = 0;
+static ssize_t rc_append_len;
+
+static struct kprobe vfs_read_kp = {
+	.symbol_name = "vfs_read",
+	.pre_handler = NULL,
+};
+
+static void rc_inject_uninstall(struct work_struct *work)
+{
+	unregister_kprobe(&vfs_read_kp);
+	RC_INFO("vfs_read kprobe 已拆除\n");
+}
+static DECLARE_WORK(rc_uninstall_work, rc_inject_uninstall);
 
 static ssize_t read_proxy(struct file *file, char __user *buf, size_t count,
 			  loff_t *pos)
@@ -85,8 +95,8 @@ static ssize_t read_iter_proxy(struct kiocb *iocb, struct iov_iter *to)
 	return ret;
 }
 
-int nm_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr,
-		       size_t *count_ptr, loff_t **pos_ptr)
+static int nm_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr,
+			      size_t *count_ptr, loff_t **pos_ptr)
 {
 	struct file *file;
 	char __user *buf;
@@ -114,10 +124,8 @@ int nm_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr,
 	if (strcmp(dpath, "/system/etc/init/atrace.rc"))
 		return 0;
 
-	if (rc_inserted) {
-		/* 注入成功一次就够，把 kprobe 拆掉（workqueue 里拆防死锁） */
+	if (rc_inserted)
 		return 0;
-	}
 	rc_inserted = true;
 
 	buf = *buf_ptr;
@@ -144,8 +152,7 @@ int nm_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr,
 	*buf_ptr = buf + rc_count;
 	*count_ptr = count - rc_count;
 
-	RC_INFO("init.rc 注入完成（%s, rc=%zu 字节）\n", dpath,
-		rc_count);
+	RC_INFO("init.rc 注入完成（%s, rc=%zu 字节）\n", dpath, rc_count);
 
 	/* 拆 kprobe（延迟到 workqueue，避免 kprobe 上下文里直接注销） */
 	schedule_work(&rc_uninstall_work);
@@ -153,34 +160,25 @@ int nm_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr,
 	return 0;
 }
 
-static void rc_inject_uninstall(struct work_struct *work)
-{
-	unregister_kprobe(&vfs_read_kp);
-	RC_INFO("vfs_read kprobe 已拆除\n");
-}
-static DECLARE_WORK(rc_uninstall_work, rc_inject_uninstall);
-
 static int read_handler_pre(struct kprobe *p, struct pt_regs *regs)
 {
 	struct file **file_ptr = (struct file **)&PT_REGS_PARM1(regs);
 	char __user **buf_ptr = (char **)&PT_REGS_PARM2(regs);
-	size_t *count_ptr = (size_t *)&PT_REGS_PARM3(regs);
+	size_t *count_ptr = (size_t **)&PT_REGS_PARM3(regs);
 	loff_t **pos_ptr = (loff_t **)&PT_REGS_CCALL_PARM4(regs);
 
 	return nm_handle_vfs_read(file_ptr, buf_ptr, count_ptr, pos_ptr);
 }
 
-static struct kprobe vfs_read_kp = {
-	.symbol_name = "vfs_read",
-	.pre_handler = read_handler_pre,
-};
-
 static int __init rc_inject_init(void)
 {
-	int ret = register_kprobe(&vfs_read_kp);
+	int ret;
 
-	RC_INFO("vfs_read kprobe 注册 %d（等待 init 读 atrace.rc）\n",
-		ret);
+	vfs_read_kp.pre_handler = read_handler_pre;
+	ret = register_kprobe(&vfs_read_kp);
+	if (ret)
+		pr_err("prop_spoof: vfs_read kprobe 注册失败 %d\n", ret);
+
 	return 0;
 }
 late_initcall(rc_inject_init);
