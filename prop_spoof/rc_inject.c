@@ -164,7 +164,7 @@ static int read_handler_pre(struct kprobe *p, struct pt_regs *regs)
 {
 	struct file **file_ptr = (struct file **)&PT_REGS_PARM1(regs);
 	char __user **buf_ptr = (char **)&PT_REGS_PARM2(regs);
-	size_t *count_ptr = (size_t **)&PT_REGS_PARM3(regs);
+	size_t *count_ptr = (size_t *)&PT_REGS_PARM3(regs);
 	loff_t **pos_ptr = (loff_t **)&PT_REGS_CCALL_PARM4(regs);
 
 	return nm_handle_vfs_read(file_ptr, buf_ptr, count_ptr, pos_ptr);
