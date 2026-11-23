@@ -43,7 +43,7 @@ struct folio *swap_cache_get_folio(swp_entry_t entry,
 /* ================================================================== */
 /* 1. 取 mm                                                            */
 /* ================================================================== */
-struct mm_struct *memx_grab_mm_by_pid(pid_t pid)
+struct mm_struct *memx_task_mm_attach(pid_t pid)
 {
 	struct task_struct *task;
 	struct mm_struct *mm = NULL;
@@ -152,7 +152,7 @@ static bool memx_va_to_pa(struct mm_struct *mm, unsigned long va,
  *      arm64 的块映射是 PMD_TYPE_SECT == 1。
  * 直接改用内核的 pmd_sect()/pmd_pfn()/pte_present()/pte_pfn() 最稳。
  */
-static bool memx_pte_still_same(struct memx_va_result *v)
+static bool memx_pte_unchanged(struct memx_va_result *v)
 {
 	if (v->block) {
 		pmd_t now = READ_ONCE(*(pmd_t *)v->pte_slot);
@@ -304,7 +304,7 @@ unsigned long memx_read_to_kbuf(struct mm_struct *mm, unsigned long va,
 
 		rcu_read_lock();
 		if (memx_va_to_pa(mm, va + done, false, &v) &&
-		    memx_pte_still_same(&v)) {
+		    memx_pte_unchanged(&v)) {
 			/* 注意：v.pa 里**已经带了页内偏移**（va & ~PAGE_MASK），
 			 * 这里不能再加 page_off，否则会读到 pa + 2*offset。 */
 			memcpy((char *)kbuf + done,
@@ -377,7 +377,7 @@ static unsigned long memx_write_fast(struct mm_struct *mm, unsigned long va,
 
 		rcu_read_lock();
 		if (!memx_va_to_pa(mm, va + done, true, &v) ||
-		    !memx_pte_still_same(&v)) {
+		    !memx_pte_unchanged(&v)) {
 			rcu_read_unlock();
 			break;
 		}

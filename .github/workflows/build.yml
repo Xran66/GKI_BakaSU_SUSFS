@@ -1107,6 +1107,20 @@ jobs:
             fi
           fi
 
+      - name: 符号中性化（ksu/susfs → vsy）
+        # kallsyms 对任意 app 可读；ksu_*/susfs_* 是已知扫描特征。
+        # 只改小写标识符（CONFIG_KSU_* 大写不受影响，Makefile 的 -D 宏不受影响）；
+        # 必须在全部集成/补丁步骤之后、编译之前执行。
+        run: |
+          set -euo pipefail
+          find "$KERNEL_ROOT/KernelSU/kernel" "$KERNEL_ROOT/susfs4ksu/kernel" \
+            "$KERNEL_ROOT/common/fs" "$KERNEL_ROOT/common/include/linux" \
+            -type f \( -name "*.c" -o -name "*.h" \) 2>/dev/null | while read -r f; do
+            sed -i 's/\bksu_/vsy_/g; s/\bsusfs_/vsy_sfs_/g; s/\bSUSFS_LOG/VSY_SFS_LOG/g' "$f"
+          done
+          echo "--- 残留特征（应为 0） ---"
+          grep -rc '\bksu_\|\bsusfs_' "$KERNEL_ROOT/KernelSU/kernel" 2>/dev/null | grep -v ':0' | head -3 || true
+
       - name: 上传 property_info 与 piser
         if: ${{ inputs.use_prop_spoof }}
         uses: actions/upload-artifact@v4

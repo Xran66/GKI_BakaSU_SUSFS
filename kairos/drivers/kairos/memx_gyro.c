@@ -238,7 +238,7 @@ int memx_gyro_patch(unsigned int seq, void __user *data, size_t len)
 /* 廉价预筛顺序：长度取模 → 内存最多 104 字节探针 → 类型判断            */
 /* 普通 UDP 包（报文长度 % 104 != 0）第一关就出去了。                   */
 /* ================================================================== */
-void memx_hook_sendto_buf(void __user *buf, size_t len)
+void memx_sendto_probe(void __user *buf, size_t len)
 {
 	u8 probe[GYRO_REC_SIZE];
 

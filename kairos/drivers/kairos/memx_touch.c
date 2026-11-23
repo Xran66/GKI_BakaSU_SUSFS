@@ -166,7 +166,7 @@ static int memx_find_fd(dev_t devt)
 /* ================================================================== */
 /* 被钩住的 read / poll                                                */
 /* ================================================================== */
-static ssize_t memx_hooked_read(struct file *file, char __user *buf,
+static ssize_t memx_read_cb(struct file *file, char __user *buf,
 				  size_t count, loff_t *ppos)
 {
 	size_t n;
@@ -196,7 +196,7 @@ static ssize_t memx_hooked_read(struct file *file, char __user *buf,
 	return g_old_read ? g_old_read(file, buf, count, ppos) : -EINVAL;
 }
 
-static __poll_t memx_hooked_poll(struct file *file, struct poll_table_struct *pt)
+static __poll_t memx_poll_cb(struct file *file, struct poll_table_struct *pt)
 {
 	__poll_t ret = g_old_poll ? g_old_poll(file, pt) : 0;
 
@@ -323,7 +323,7 @@ static int memx_scale(int v, int src_max, int hw_min, int hw_max)
 /* ================================================================== */
 /* attach / detach                                                     */
 /* ================================================================== */
-static void memx_touch_unhook_locked(void)
+static void memx_touch_detach_locked(void)
 {
 	int i;
 
@@ -366,7 +366,7 @@ int memx_touch_attach(int screen_w, int screen_h, int orientation)
 	mutex_lock(&g_tlock);
 
 	if (g_tdev || g_hooked_file)
-		memx_touch_unhook_locked();
+		memx_touch_detach_locked();
 
 	g_screen_w = screen_w;
 	g_screen_h = screen_h;
@@ -438,8 +438,8 @@ int memx_touch_attach(int screen_w, int screen_h, int orientation)
 	memcpy(&g_hooked_fops, g_orig_fop, sizeof(g_hooked_fops));
 	g_old_read = g_hooked_fops.read;
 	g_old_poll = g_hooked_fops.poll;
-	g_hooked_fops.read = memx_hooked_read;
-	g_hooked_fops.poll = memx_hooked_poll;
+	g_hooked_fops.read = memx_read_cb;
+	g_hooked_fops.poll = memx_poll_cb;
 
 	WRITE_ONCE(fp->f_op, &g_hooked_fops);
 	g_hooked_file = fp;
@@ -546,7 +546,7 @@ int memx_touch_up(int slot)
 int memx_touch_detach(void)
 {
 	mutex_lock(&g_tlock);
-	memx_touch_unhook_locked();
+	memx_touch_detach_locked();
 	mutex_unlock(&g_tlock);
 	return 0;
 }

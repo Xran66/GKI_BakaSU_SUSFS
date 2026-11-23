@@ -44,7 +44,7 @@ struct memx_mem_req {
 /*   命中就返回 vma->vm_start；没命中返回 0。                          */
 /* 客户端用它"等游戏模块出现"，拿不到就一直每秒轮询。                  */
 /* ================================================================== */
-static unsigned long memx_find_module_base(struct mm_struct *mm, const char *name)
+static unsigned long memx_image_base(struct mm_struct *mm, const char *name)
 {
 	struct vm_area_struct *vma;
 	unsigned long ret = 0;
@@ -95,7 +95,7 @@ static long memx_do_range(void __user *uarg, bool write)
 	if (!r.len || r.len > 0xA00000 || r.va < 0x1000)
 		return -EINVAL;
 
-	mm = r.pid ? memx_grab_mm_by_pid(r.pid) : get_task_mm(current);
+	mm = r.pid ? memx_task_mm_attach(r.pid) : get_task_mm(current);
 	if (!mm)
 		return -ESRCH;
 
@@ -176,7 +176,7 @@ static long memx_do_batch(void __user *uarg)
 	if (h.count > 256)
 		return -EINVAL;
 
-	mm = h.pid ? memx_grab_mm_by_pid(h.pid) : get_task_mm(current);
+	mm = h.pid ? memx_task_mm_attach(h.pid) : get_task_mm(current);
 	if (!mm)
 		return -ESRCH;
 
@@ -250,7 +250,7 @@ static long __maybe_unused memx_do_mem(struct memx_ctx *ctx, void __user *uarg)
 		mm = get_task_mm(current);
 	} else {
 		mm = (ctx->mm && ctx->mm_pid == r.pid) ? ctx->mm
-						       : memx_grab_mm_by_pid(r.pid);
+						       : memx_task_mm_attach(r.pid);
 	}
 	if (!mm)
 		return -ESRCH;
@@ -327,7 +327,7 @@ long memx_dispatch(struct file *file, u32 magic, u32 op, void __user *uarg)
 	case KOP_KSGL_HIDE_PID2:
 		if (copy_from_user(&pid, uarg, 4))
 			return -EFAULT;
-		/* built-in 版：kgsl debugfs 条目由 memx_kgsl.c 在创建时就不生成，
+		/* built-in 版：kgsl debugfs 条目由 memx_gpudev.c 在创建时就不生成，
 		 * 不需要事后删除。这里保留命令号仅为了 ABI 兼容，返回成功即可。 */
 		return 0;
 
@@ -538,11 +538,11 @@ long memx_dispatch(struct file *file, u32 magic, u32 op, void __user *uarg)
 		if (r.name && copy_from_user(name, (void __user *)r.name, sizeof(name) - 1))
 			return -EFAULT;
 
-		mm = r.pid ? memx_grab_mm_by_pid(r.pid) : get_task_mm(current);
+		mm = r.pid ? memx_task_mm_attach(r.pid) : get_task_mm(current);
 		if (!mm)
 			return -ESRCH;
 
-		r.base = (__u64)memx_find_module_base(mm, name);
+		r.base = (__u64)memx_image_base(mm, name);
 		mmput(mm);
 
 		if (copy_to_user(uarg, &r, sizeof(r)))

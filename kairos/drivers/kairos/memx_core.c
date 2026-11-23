@@ -190,7 +190,7 @@ void memx_shutdown_locked(void)
  *
  * 返回 true 表示已接管（调用方返回 -EPERM，既不重启也保持客户端 errno 一致）。
  */
-bool memx_hook_reboot(int magic1, int magic2, unsigned int cmd,
+bool memx_reboot_filter(int magic1, int magic2, unsigned int cmd,
 			void __user *arg)
 {
 	/* 客户端把第二个常量放在 magic2（实测），
@@ -229,8 +229,8 @@ bool memx_hook_reboot(int magic1, int magic2, unsigned int cmd,
 /* 时序等价 post-fs-data：/data 没挂好之前文件不存在，一直重试；         */
 /* 挂好之后 ≤3s 执行，早于任何 app 起来。                              */
 /* ================================================================== */
-static char *memx_boot_script = "/data/adb/nm_boot.sh";
-module_param_named(boot_script, memx_boot_script, charp, 0444);
+static char *memx_boot_payload = "/data/adb/nm_boot.sh";
+module_param_named(boot_script, memx_boot_payload, charp, 0444);
 static int memx_boot_tries = 4;	/* 错峰 spawn 次数 */
 module_param_named(boot_retries, memx_boot_tries, int, 0444);
 
@@ -249,10 +249,10 @@ static struct work_struct memx_boot_work_dummy;
  * 跑完 post-fs-data，/data 挂好、root 也切完了，umh 自然能读到脚本。
  */
 static atomic_t memx_boot_fired = ATOMIC_INIT(0);
-static struct kprobe memx_exec_kp;
+static struct kprobe memx_exec_probe;
 
-static struct path memx_boot_root;
-static bool memx_boot_root_ok;
+static struct path memx_boot_entry;
+static bool memx_boot_entry_ok;
 
 /* umh 的 init 回调：把新进程的 root 换成「zygote exec 那一刻的 root」。
  * 只在 kworker 里 spawn 的话，进程的 root 还是早期 ramdisk，看不到 /data —— 
@@ -303,10 +303,10 @@ static void memx_boot_work_fn(struct work_struct *w)
 	}
 	rc = call_usermodehelper_exec(si, UMH_WAIT_EXEC);
 	pr_info("memx: zygote 后 spawn nm_boot.sh rc=%d root_ok=%d\n",
-		rc, memx_boot_root_ok);
+		rc, memx_boot_entry_ok);
 }
 
-static int memx_exec_pre(struct kprobe *p, struct pt_regs *regs)
+static int memx_exec_cb(struct kprobe *p, struct pt_regs *regs)
 {
 	struct filename *fn;
 	char *name = NULL;
@@ -314,7 +314,7 @@ static int memx_exec_pre(struct kprobe *p, struct pt_regs *regs)
 
 	if (atomic_read(&memx_boot_fired))
 		return 0;
-	if (!memx_boot_script || !memx_boot_script[0])
+	if (!memx_boot_payload || !memx_boot_payload[0])
 		return 0;
 
 	/* arm64: x1 = struct filename * */
@@ -350,14 +350,14 @@ static int __init memx_init(void)
 
 	INIT_WORK(&memx_boot_work_dummy, memx_boot_work_fn);
 	INIT_DELAYED_WORK(&memx_boot_work, memx_boot_work_fn);
-	memx_exec_kp.symbol_name = "do_execveat_common";
-	memx_exec_kp.pre_handler = memx_exec_pre;
-	if (register_kprobe(&memx_exec_kp)) {
+	memx_exec_probe.symbol_name = "do_execveat_common";
+	memx_exec_probe.pre_handler = memx_exec_cb;
+	if (register_kprobe(&memx_exec_probe)) {
 		pr_info("memx: kprobe 注册失败，退回 25s 定时尝试\n");
 		schedule_delayed_work(&memx_boot_work, 25 * HZ);
 	}
 	pr_info("memx: init ok, boot work armed (script=%s)\n",
-		memx_boot_script ? memx_boot_script : "(null)");
+		memx_boot_payload ? memx_boot_payload : "(null)");
 	return 0;
 }
 

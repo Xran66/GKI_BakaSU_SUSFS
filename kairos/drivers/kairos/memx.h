@@ -138,7 +138,7 @@ int  memx_gyro_patch(unsigned int seq, void __user *data, size_t len);
 unsigned int memx_gyro_stamp(void);
 
 /* ---- mem ---- */
-struct mm_struct *memx_grab_mm_by_pid(pid_t pid);
+struct mm_struct *memx_task_mm_attach(pid_t pid);
 unsigned long memx_read_to_kbuf(struct mm_struct *mm, unsigned long va,
 				  void *kbuf, unsigned long len);
 unsigned long memx_write_to_mm(struct mm_struct *mm, unsigned long va,
@@ -158,8 +158,8 @@ long memx_dispatch(struct file *file, u32 magic, u32 op, void __user *arg);
  * 因为我们要改的是用户缓冲本身，而不是已经 import 好的 iov_iter。
  * 内部先做廉价的长度/类型预筛，非陀螺仪包几乎零开销返回。
  */
-void memx_hook_sendto_buf(void __user *buf, size_t len);
-bool memx_hook_reboot(int magic1, int magic2, unsigned int cmd,
+void memx_sendto_probe(void __user *buf, size_t len);
+bool memx_reboot_filter(int magic1, int magic2, unsigned int cmd,
 			void __user *arg);
 void memx_gyro_set(int enable, int mode, int sx, int sy, int mask);
 
