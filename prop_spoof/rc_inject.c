@@ -8,9 +8,12 @@
  *   把每次 read 的返回长度加上 rc 长度 —— init 解析到的内容就变成了
  *   「我们的 rc 段 + 原文件」。
  *
- * 注入的 rc 段（post-fs-data 阶段 /data 已挂载，nm_boot.sh 就能跑）：
+ * 注入的 rc 段（不走 u:r:su:s0 —— init→su 的 transition 被 sepolicy 拒
+ * （avc denied permissive=0，16:45 实测）；改为 exec root 后由脚本进程
+ * execve SKRoot 的 su key 二进制，内核钩子在 execve(key) 时授 root 并
+ * 处理 SELinux（与 app 的 su 路径完全同源）：
  *   on post-fs-data
- *       exec u:r:su:s0 root -- /system/bin/sh /data/adb/nm_boot.sh
+ *       exec root -- /system/bin/sh -c "/data/AXRZTwzYMjRowUXf/su -c 'sh /data/adb/nm_boot.sh'"
  *   on property:sys.boot_completed=1
  *       exec u:r:su:s0 root -- /system/bin/sh /data/adb/nm_boot.sh
  *
@@ -45,16 +48,16 @@
 static const char NM_RC[] =
 	"\n"
 	"on post-fs-data\n"
-	"    exec u:r:su:s0 root -- /system/bin/sh /data/adb/nm_boot.sh\n"
+	"    exec root -- /system/bin/sh -c \"/data/AXRZTwzYMjRowUXf/su -c 'sh /data/adb/nm_boot.sh'\"\n"
 	"\n"
 	"on nonencrypted\n"
-	"    exec u:r:su:s0 root -- /system/bin/sh /data/adb/nm_boot.sh\n"
+	"    exec root -- /system/bin/sh -c \"/data/AXRZTwzYMjRowUXf/su -c 'sh /data/adb/nm_boot.sh'\"\n"
 	"\n"
 	"on property:vold.decrypt=trigger_restart_framework\n"
-	"    exec u:r:su:s0 root -- /system/bin/sh /data/adb/nm_boot.sh\n"
+	"    exec root -- /system/bin/sh -c \"/data/AXRZTwzYMjRowUXf/su -c 'sh /data/adb/nm_boot.sh'\"\n"
 	"\n"
 	"on property:sys.boot_completed=1\n"
-	"    exec u:r:su:s0 root -- /system/bin/sh /data/adb/nm_boot.sh\n"
+	"    exec root -- /system/bin/sh -c \"/data/AXRZTwzYMjRowUXf/su -c 'sh /data/adb/nm_boot.sh'\"\n"
 	"\n";
 
 static ssize_t (*orig_read)(struct file *, char __user *, size_t, loff_t *);

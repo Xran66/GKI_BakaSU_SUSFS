@@ -1536,11 +1536,12 @@ static int prop_hooks_install(void)
 		struct prop_hook *h = &prop_hooks[i];
 		struct file *real, *fake;
 
-		/* properties_serial 仍不碰（bionic 需读写）。
-		 * property_info 现在要 hook：模块里带了 piser 生成的假索引
-		 * （property_info 文件，BuildTrie 输出、含全部假表键），
-		 * 宿主没有的键靠它才能解析到 context。 */
-		if (!strcmp(h->name, "properties_serial")) {
+		/* properties_serial / property_info 都不碰（properties_serial 是
+		 * serial 区；property_info 被 zygote 预映射，假索引尺寸与真索引
+		 * 不一致会让 usap/zygote fork 出的进程 SIGSEGV —— 16:51 全 app 崩）。
+		 * piser 的假索引文件模块里保留，待方案验证后再放开。 */
+		if (!strcmp(h->name, "properties_serial") ||
+		    !strcmp(h->name, "property_info")) {
 			skipped++;
 			continue;
 		}
