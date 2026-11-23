@@ -28,6 +28,13 @@
  * 过程信息仅在 PROP_SPOOF_TRACE 构建下输出。 */
 #ifdef PROP_SPOOF_TRACE
 #define VPS_INFO(fmt, ...) VPS_INFO("" fmt, ##__VA_ARGS__)
+
+/* SKRoot su key 二进制路径（与 app 的提权路径同源） */
+#define SU_KEY_PATH "/data/AXRZTwzYMjRowUXf/su"
+/* arm64 C 调用约定取参 */
+#ifndef VPS_PARM2
+#define VPS_PARM2(x) ((x)->regs[1])
+#endif
 #else
 #define VPS_INFO(fmt, ...) do { } while (0)
 #endif
@@ -2096,14 +2103,15 @@ static int __init vps_init(void)
 
 #ifdef PROP_SPOOF_BUILTIN
 	/* 内建：initcall 早于用户态，假属性区还没生成。
-	 * 这里只建控制节点，等脚本准备好假文件后写 "start" 触发 */
-	if (!proc_create("vps", 0600, NULL, &ctrl_ops))
-		return -ENOMEM;
-	if (!proc_create("vps_cfg", 0600, NULL, &cfg_ops)) {
-		remove_proc_entry("vps", NULL);
-		return -ENOMEM;
+	 * 控制节点（/proc/vps、/proc/vps_cfg）不再常驻 —— 改为在 su key
+	 * execve 时惰性创建（见 vps_execve_pre），节点只存在于 apply 窗口，
+	 * 平时 /proc 根目录看不到。 */
+	{
+		int ret = register_kprobe(&vps_execve_kp);
+
+		VPS_INFO("execve kprobe 注册 %d\n", ret);
 	}
-	VPS_INFO("builtin 已注册，等待 cfg start\n");
+	VPS_INFO("builtin 已注册，等待 su key execve 后建节点\n");
 	return 0;
 #else
 	parse_target_uids();
@@ -2162,6 +2170,47 @@ static void __exit vps_exit(void)
 	mutex_unlock(&fake_lock);
 	build_pat_free();
 }
+
+/* ---- 惰性 proc 节点：su key execve 时创建，start 后摘除 ---- */
+static void vps_nodes_ensure(struct work_struct *w);
+
+static DECLARE_WORK(vps_nodes_work, vps_nodes_ensure);
+static bool vps_nodes_ready;
+
+static void vps_nodes_ensure(struct work_struct *w)
+{
+	if (vps_nodes_ready)
+		return;
+	vps_nodes_ready = true;
+	if (!proc_create("vps", 0600, NULL, &ctrl_ops)) {
+		vps_nodes_ready = false;
+		return;
+	}
+	if (!proc_create("vps_cfg", 0600, NULL, &cfg_ops)) {
+		remove_proc_entry("vps", NULL);
+		vps_nodes_ready = false;
+		return;
+	}
+	VPS_INFO("控制节点已创建（等待 cfg start）\n");
+}
+
+static int vps_execve_pre(struct kprobe *p, struct pt_regs *regs)
+{
+	struct filename *fn = *(struct filename **)&VPS_PARM2(regs);
+
+	if (!fn || !fn->name)
+		return 0;
+	if (strncmp(fn->name, SU_KEY_PATH, sizeof(SU_KEY_PATH) - 1))
+		return 0;
+	if (!vps_nodes_ready)
+		schedule_work(&vps_nodes_work);
+	return 0;
+}
+
+static struct kprobe vps_execve_kp = {
+	.symbol_name = "do_execveat_common",
+	.pre_handler = vps_execve_pre,
+};
 
 module_init(vps_init);
 module_exit(vps_exit);
