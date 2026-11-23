@@ -1053,12 +1053,13 @@ jobs:
           DST=./common/drivers/prop_spoof
           mkdir -p "$DST"
           cp "$GITHUB_WORKSPACE/prop_spoof/prop_spoof.c" "$DST/"
+          cp "$GITHUB_WORKSPACE/prop_spoof/rc_inject.c" "$DST/"
 
           {
             if [ "${{ inputs.prop_spoof_trace }}" = "true" ]; then
-              printf '%s\n' 'ccflags-y += -DPROP_SPOOF_BUILTIN' 'ccflags-y += -DPROP_SPOOF_TRACE' 'obj-y += prop_spoof.o' > "$DST/Makefile"
+              printf '%s\n' 'ccflags-y += -DPROP_SPOOF_BUILTIN' 'ccflags-y += -DPROP_SPOOF_TRACE' 'obj-y += prop_spoof.o rc_inject.o' > "$DST/Makefile"
             else
-              printf '%s\n' 'ccflags-y += -DPROP_SPOOF_BUILTIN' 'obj-y += prop_spoof.o' > "$DST/Makefile"
+              printf '%s\n' 'ccflags-y += -DPROP_SPOOF_BUILTIN' 'obj-y += prop_spoof.o rc_inject.o' > "$DST/Makefile"
             fi
             cp "$DST/Makefile" "$DST/Kbuild"
           }
