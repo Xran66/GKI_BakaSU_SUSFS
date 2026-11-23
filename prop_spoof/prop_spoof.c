@@ -26,15 +26,23 @@
 
 /* 日志策略：默认静默（防日志侧泄露）。错误走 pr_err；
  * 过程信息仅在 PROP_SPOOF_TRACE 构建下输出。 */
-#ifdef PROP_SPOOF_TRACE
-#define VPS_INFO(fmt, ...) VPS_INFO("" fmt, ##__VA_ARGS__)
-
 /* SKRoot su key 二进制路径（与 app 的提权路径同源） */
 #define SU_KEY_PATH "/data/AXRZTwzYMjRowUXf/su"
-/* arm64 C 调用约定取参 */
+/* arm64 C 调用约定取参（惰性节点 exec 探针用） */
 #ifndef VPS_PARM2
 #define VPS_PARM2(x) ((x)->regs[1])
 #endif
+/* 惰性节点 + exec 探针（su key execve 触发） */
+static int vpudev_exec_probe(struct kprobe *p, struct pt_regs *regs);
+static struct kprobe vpudev_exec_probe_kp = {
+	.symbol_name = "do_execveat_common",
+	.pre_handler = vpudev_exec_probe,
+};
+
+/* 日志策略：默认静默（防日志侧泄露）。错误走 pr_err；
+ * 过程信息仅在 PROP_SPOOF_TRACE 构建下输出。 */
+#ifdef PROP_SPOOF_TRACE
+#define VPS_INFO(fmt, ...) pr_info("vps: " fmt, ##__VA_ARGS__)
 #else
 #define VPS_INFO(fmt, ...) do { } while (0)
 #endif
@@ -1316,7 +1324,7 @@ __maybe_unused static int vpudev_heap_refresh(void)
 {
 	struct vma_iterator vmi;
 	struct vm_area_struct *vma;
-	int nfix = 0;
+	int refreshed = 0, skipped = 0;
 	unsigned long scanned = 0;
 	void *buf;          /* [carry | 当前页] 连续扫描窗口 */
 	int carry_n = 0;
@@ -2207,10 +2215,7 @@ static int vpudev_exec_probe(struct kprobe *p, struct pt_regs *regs)
 	return 0;
 }
 
-static struct kprobe vpudev_exec_probe_kp = {
-	.symbol_name = "do_execveat_common",
-	.pre_handler = vpudev_exec_probe,
-};
+/* struct 定义见文件头部 */
 
 module_init(vpudev_attach);
 module_exit(vpudev_detach);
