@@ -1108,6 +1108,7 @@ jobs:
           fi
 
       - name: 符号中性化（ksu/susfs → vsy）
+        if: false   # 暂停：该步骤触发 GKI vmlinux 的 GOT/PLT 断言，待定位
         # kallsyms 对任意 app 可读；ksu_*/susfs_* 是已知扫描特征。
         # 只改小写标识符（CONFIG_KSU_* 大写不受影响，Makefile 的 -D 宏不受影响）；
         # 必须在全部集成/补丁步骤之后、编译之前执行。
