@@ -2573,6 +2573,7 @@ ro.secure u:object_r:exported_default_prop:s0 exact
 ro.serialno u:object_r:exported_default_prop:s0 exact
 ro.sf.2nd_lcd_density u:object_r:exported_default_prop:s0 exact
 ro.sf.lcd_density u:object_r:exported_default_prop:s0 exact
+ro.hardware u:object_r:exported_default_prop:s0 exact
 ro.soc.manufacturer u:object_r:exported_default_prop:s0 exact
 ro.soc.model u:object_r:exported_default_prop:s0 exact
 ro.strongbox.manufacturer u:object_r:exported_default_prop:s0 exact

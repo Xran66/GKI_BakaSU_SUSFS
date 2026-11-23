@@ -1067,6 +1067,8 @@ jobs:
               "$GITHUB_WORKSPACE/piser/trie_builder.cpp" \
               "$GITHUB_WORKSPACE/piser/trie_serializer.cpp"
             /tmp/piser_host "$GITHUB_WORKSPACE/prop_spoof/contexts.txt" "$DST/property_info"
+            sudo apt-get install -y g++-aarch64-linux-gnu >/dev/null 2>&1 || \
+              sudo apt-get update >/dev/null 2>&1 && sudo apt-get install -y g++-aarch64-linux-gnu >/dev/null 2>&1 || true
             if command -v aarch64-linux-gnu-g++ >/dev/null 2>&1; then
               aarch64-linux-gnu-g++ -std=c++17 -O2 -static -I "$GITHUB_WORKSPACE/piser" -o "$DST/piser" \
                 "$GITHUB_WORKSPACE/piser/main.cpp" \
@@ -1074,6 +1076,9 @@ jobs:
                 "$GITHUB_WORKSPACE/piser/property_info_serializer/property_info_serializer.cpp" \
                 "$GITHUB_WORKSPACE/piser/trie_builder.cpp" \
                 "$GITHUB_WORKSPACE/piser/trie_serializer.cpp"
+              echo "piser aarch64: $(ls -la "$DST/piser" | awk '{print $5}') bytes"
+            else
+              echo "::warning::aarch64 交叉编译器缺失，piser 未随模块分发"
             fi
           fi
 
