@@ -17,6 +17,7 @@
 #ifndef PROPERTY_INFO_SERIALIZER_TRIE_BUILDER_H
 #define PROPERTY_INFO_SERIALIZER_TRIE_BUILDER_H
 
+#include <algorithm>
 #include <memory>
 #include <set>
 #include <string>

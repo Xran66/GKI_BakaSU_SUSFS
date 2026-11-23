@@ -17,8 +17,8 @@
 #ifndef PROPERTY_INFO_SERIALIZER_TRIE_NODE_ARENA_H
 #define PROPERTY_INFO_SERIALIZER_TRIE_NODE_ARENA_H
 
-#include <string>
-#include <vector>
+string>
+vector>
 
 namespace android {
 namespace properties {
