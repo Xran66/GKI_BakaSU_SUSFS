@@ -1536,12 +1536,11 @@ static int prop_hooks_install(void)
 		struct prop_hook *h = &prop_hooks[i];
 		struct file *real, *fake;
 
-		/* properties_serial / property_info 都不碰：property_info 被
-		 * zygote 预映射，假索引尺寸/布局与真索引不一致会让
-		 * usap/zygote fork 进程 SIGSEGV（16:51 事故）。
-		 * piser 假索引文件模块里保留，待方案验证后再放开。 */
-		if (!strcmp(h->name, "properties_serial") ||
-		    !strcmp(h->name, "property_info")) {
+		/* properties_serial 仍不碰（bionic 需读写）。
+		 * property_info 重新参与 hook：脚本用 piser 生成假索引并
+		 * zero-pad 到真索引尺寸（bionic 只读 header->size，padding
+		 * 无害），VMA 迁移映射尺寸一致 → 无 usap SIGSEGV。 */
+		if (!strcmp(h->name, "properties_serial")) {
 			skipped++;
 			continue;
 		}
