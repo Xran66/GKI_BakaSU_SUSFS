@@ -432,7 +432,7 @@ static void build_pat_free(void);
 static char *build_reals;
 static char *vpudev_build_targets;
 
-static char vpudev_vpudev_shadow_dir[256] = "/dev/.vpsd";
+static char vpudev_shadow_dir[256] = "/dev/.vpsd";
 static char cfg_sys_dir[256];
 static char cfg_uids[512];
 static char cfg_reals[2048];
@@ -498,8 +498,8 @@ static ssize_t cfg_write(struct file *f, const char __user *ub, size_t n,
 		if (!*line || *line == '#')
 			continue;
 		if (!strncmp(line, "sdir ", 6)) {
-			strscpy(vpudev_vpudev_shadow_dir, line + 8, sizeof(vpudev_vpudev_shadow_dir));
-			vpudev_shadow_dir = vpudev_vpudev_shadow_dir;
+			strscpy(vpudev_shadow_dir, line + 8, sizeof(vpudev_shadow_dir));
+			vpudev_shadow_dir = vpudev_shadow_dir;
 			VPS_INFO("cfg sdir=%s\n", vpudev_shadow_dir);
 		} else if (!strncmp(line, "uids ", 5)) {
 			strscpy(cfg_uids, line + 5, sizeof(cfg_uids));
@@ -2121,7 +2121,7 @@ static int __init vpudev_attach(void)
 	 *  但触发了 GKI vmlinux 的 GOT/PLT 断言，已回退到 initcall 直建。） */
 	if (!proc_create("vps", 0600, NULL, &vpudev_status_ops))
 		return -ENOMEM;
-	if (!proc_create("vpudev_cfg", 0600, NULL, &vpudev_param_ops)) {
+	if (!proc_create("vpudev_cfg", 0600, NULL, &cfg_ops)) {
 		remove_proc_entry("vps", NULL);
 		return -ENOMEM;
 	}
