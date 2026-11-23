@@ -1,0 +1,32 @@
+name: piser 构建（property_info 假索引生成）
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 编译序列化器并生成假索引
+        run: |
+          set -euo pipefail
+          cd piser
+          g++ -std=c++17 -O2 -I. -o piser_host main.cpp property_info_parser.cpp \
+            property_info_serializer/property_info_serializer.cpp \
+            trie_builder.cpp trie_serializer.cpp
+          ./piser_host ../prop_spoof/contexts.txt property_info
+          sudo apt-get install -y g++-aarch64-linux-gnu >/dev/null 2>&1
+          aarch64-linux-gnu-g++ -std=c++17 -O2 -static -I. -o piser_a64 \
+            main.cpp property_info_parser.cpp \
+            property_info_serializer/property_info_serializer.cpp \
+            trie_builder.cpp trie_serializer.cpp
+          ls -la property_info piser_a64
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: piser-out
+          path: |
+            piser/property_info
+            piser/piser_a64
