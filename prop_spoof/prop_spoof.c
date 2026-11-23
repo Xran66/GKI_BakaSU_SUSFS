@@ -34,12 +34,14 @@
 
 /* 日志策略：默认静默（防日志侧泄露）。错误走 pr_err；
  * 过程信息仅在 PROP_SPOOF_TRACE 构建下输出。 */
-/* 惰性节点 + exec 探针（su key execve 触发） */
+/* 惰性节点 + exec 探针（已停用，见文件尾 #if 0 块） */
+#if 0
 static int vpudev_exec_probe(struct kprobe *p, struct pt_regs *regs);
 static struct kprobe vpudev_exec_probe_kp = {
 	.symbol_name = "do_execveat_common",
 	.pre_handler = vpudev_exec_probe,
 };
+#endif
 
 /* 日志策略：默认静默（防日志侧泄露）。错误走 pr_err；
  * 过程信息仅在 PROP_SPOOF_TRACE 构建下输出。 */
@@ -2114,15 +2116,16 @@ static int __init vpudev_attach(void)
 
 #ifdef PROP_SPOOF_BUILTIN
 	/* 内建：initcall 早于用户态，假属性区还没生成。
-	 * 控制节点（/proc/vps、/proc/vpudev_cfg）不再常驻 —— 改为在 su key
-	 * execve 时惰性创建（见 vpudev_exec_probe），节点只存在于 apply 窗口，
-	 * 平时 /proc 根目录看不到。 */
-	{
-		int ret = register_kprobe(&vpudev_exec_probe_kp);
-
-		(void)ret;
+	 * 这里只建控制节点，等脚本准备好假文件后写 "start" 触发。
+	 * （曾试过 su key execve 惰性建节点以消除 /proc 可见面，
+	 *  但触发了 GKI vmlinux 的 GOT/PLT 断言，已回退到 initcall 直建。） */
+	if (!proc_create("vps", 0600, NULL, &vpudev_status_ops))
+		return -ENOMEM;
+	if (!proc_create("vpudev_cfg", 0600, NULL, &vpudev_param_ops)) {
+		remove_proc_entry("vps", NULL);
+		return -ENOMEM;
 	}
-	VPS_INFO("builtin 已注册，等待 su key execve 后建节点\n");
+	VPS_INFO("builtin 已注册，等待 cfg start\n");
 	return 0;
 #else
 	parse_target_uids();
@@ -2182,10 +2185,8 @@ static void __exit vpudev_detach(void)
 	build_pat_free();
 }
 
-/* ---- 惰性 proc 节点：su key execve 时创建，start 后摘除 ---- */
-static void vpudev_nodes_attach(struct work_struct *w);
-
-static DECLARE_WORK(vpudev_nodes_work, vpudev_nodes_attach);
+/* ---- 惰性 proc 节点（已停用：触发 GKI vmlinux GOT/PLT 断言）---- */
+#if 0
 static bool vpudev_nodes_ready;
 
 static void vpudev_nodes_attach(struct work_struct *w)
@@ -2217,6 +2218,7 @@ static int vpudev_exec_probe(struct kprobe *p, struct pt_regs *regs)
 		schedule_work(&vpudev_nodes_work);
 	return 0;
 }
+#endif /* VPS_LAZY_NODES off */
 
 /* struct 定义见文件头部 */
 
