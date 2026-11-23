@@ -1107,6 +1107,16 @@ jobs:
             fi
           fi
 
+      - name: 上传 property_info 与 piser
+        if: ${{ inputs.use_prop_spoof }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: prop-info-file
+          path: |
+            android15-6.6-139/common/drivers/prop_spoof/property_info
+            android15-6.6-139/common/drivers/prop_spoof/piser
+          if-no-files-found: ignore
+
       # ==================== 备份原始 defconfig ====================
       # 用于后续生成 defconfig fragment（bazel trim 兼容）
       - name: 备份原始 defconfig
