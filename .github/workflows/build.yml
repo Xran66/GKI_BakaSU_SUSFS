@@ -1113,9 +1113,9 @@ jobs:
         # 必须在全部集成/补丁步骤之后、编译之前执行。
         run: |
           set -euo pipefail
-          find "$KERNEL_ROOT/KernelSU/kernel" "$KERNEL_ROOT/susfs4ksu/kernel" \
+          ( find "$KERNEL_ROOT/KernelSU/kernel" "$KERNEL_ROOT/susfs4ksu/kernel" \
             "$KERNEL_ROOT/common/fs" "$KERNEL_ROOT/common/include/linux" \
-            -type f \( -name "*.c" -o -name "*.h" \) 2>/dev/null | while read -r f; do
+            -type f \( -name "*.c" -o -name "*.h" \) 2>/dev/null || true ) | while read -r f; do
             sed -i 's/\bksu_/vsy_/g; s/\bsusfs_/vsy_sfs_/g; s/\bSUSFS_LOG/VSY_SFS_LOG/g' "$f"
           done
           echo "--- 残留特征（应为 0） ---"
