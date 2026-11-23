@@ -1344,7 +1344,6 @@ __maybe_unused static int patch_build_heap(void)
 		carry_n = 0;
 		{
 			int pages = 0;
-			static int dbg_vmas;
 
 			for (addr = vma->vm_start; addr < vma->vm_end;
 			     addr += PAGE_SIZE) {
@@ -1355,14 +1354,6 @@ __maybe_unused static int patch_build_heap(void)
 						   PAGE_SIZE)) {
 					carry_n = 0;
 					continue;
-				}
-				if (dbg_vmas < 4 && pages == 0) {
-					u8 *b = buf;
-
-					PS_INFO("dbg vma[%d]=%s first=%02x%02x%02x%02x%02x%02x%02x%02x\n",
-						dbg_vmas, nm, b[0], b[1], b[2],
-						b[3], b[4], b[5], b[6], b[7]);
-					dbg_vmas++;
 				}
 				pages++;
 				/* 全零页：不可能含对象，跳过扫描并断开 carry */
