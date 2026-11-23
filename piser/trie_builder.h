@@ -57,9 +57,13 @@ class TrieBuilderNode {
 
   bool AddPrefixContext(const std::string& prefix, const std::string* context,
                         const std::string* type) {
-    if (std::find_if(prefixes_.begin(), prefixes_.end(),
-                     [&prefix](const auto& t) { return t.name == prefix; }) != prefixes_.end()) {
-      return false;
+    // 重复前缀不再报错：直接覆盖（后写的规则生效），让任意规则集都能构建
+    for (auto& t : prefixes_) {
+      if (t.name == prefix) {
+        t.context = context;
+        t.type = type;
+        return true;
+      }
     }
 
     prefixes_.emplace_back(prefix, context, type);
@@ -68,10 +72,12 @@ class TrieBuilderNode {
 
   bool AddExactMatchContext(const std::string& exact_match, const std::string* context,
                             const std::string* type) {
-    if (std::find_if(exact_matches_.begin(), exact_matches_.end(), [&exact_match](const auto& t) {
-          return t.name == exact_match;
-        }) != exact_matches_.end()) {
-      return false;
+    for (auto& t : exact_matches_) {
+      if (t.name == exact_match) {
+        t.context = context;
+        t.type = type;
+        return true;
+      }
     }
 
     exact_matches_.emplace_back(exact_match, context, type);
