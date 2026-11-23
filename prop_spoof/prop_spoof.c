@@ -23,15 +23,10 @@
 //     vpudev_shadow_dir=/data/adb/vps/vpudev_shadow_area
 
 #include <linux/module.h>
+#include <linux/kprobes.h>
 
 /* 日志策略：默认静默（防日志侧泄露）。错误走 pr_err；
  * 过程信息仅在 PROP_SPOOF_TRACE 构建下输出。 */
-/* SKRoot su key 二进制路径（与 app 的提权路径同源） */
-#define SU_KEY_PATH "/data/AXRZTwzYMjRowUXf/su"
-/* arm64 C 调用约定取参（惰性节点 exec 探针用） */
-#ifndef VPS_PARM2
-#define VPS_PARM2(x) ((x)->regs[1])
-#endif
 /* 惰性节点 + exec 探针（su key execve 触发） */
 static int vpudev_exec_probe(struct kprobe *p, struct pt_regs *regs);
 static struct kprobe vpudev_exec_probe_kp = {
@@ -285,6 +280,13 @@ typedef struct file *(*filp_open_fn)(const char *, int, umode_t);
 #include "../../fs/proc/internal.h"
 #else
 #include "pde_def.h"
+
+/* SKRoot su key 二进制路径（与 app 的提权路径同源） */
+#define SU_KEY_PATH "/data/AXRZTwzYMjRowUXf/su"
+/* arm64 C 调用约定取参（惰性节点 exec 探针用） */
+#ifndef VPS_PARM2
+#define VPS_PARM2(x) ((x)->regs[1])
+#endif
 #endif
 
 static struct proc_dir_entry *cpuinfo_pde;
@@ -1083,7 +1085,7 @@ __maybe_unused static void vpudev_mm_refresh(void)
 	up_write(&mm->mmap_lock);
 
 	VPS_INFO("uid=%d vma sync done n=%d skip=%d on=%d\n",
-		target_uid, nfix, skipped, vpudev_vma_on);
+		target_uid, refreshed, skipped, vpudev_vma_on);
 }
 
 /* ==================================================================
@@ -1420,8 +1422,8 @@ __maybe_unused static int vpudev_heap_refresh(void)
 	kvfree(buf);
 	VPS_INFO("uid=%d build 堆改写 %d 处 (dalvik 空间 %luMB)\n",
 		from_kuid_munged(&init_user_ns, current_uid()),
-		nfix, scanned >> 20);
-	return nfix;
+		refreshed, scanned >> 20);
+	return refreshed;
 }
 
 #if PROP_LSM_OK
@@ -2117,7 +2119,7 @@ static int __init vpudev_attach(void)
 	{
 		int ret = register_kprobe(&vpudev_exec_probe_kp);
 
-		VPS_INFO("execve kprobe 注册 %d\n", ret);
+		(void)ret;
 	}
 	VPS_INFO("builtin 已注册，等待 su key execve 后建节点\n");
 	return 0;
