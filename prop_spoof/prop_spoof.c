@@ -432,7 +432,7 @@ static void build_pat_free(void);
 static char *build_reals;
 static char *vpudev_build_targets;
 
-static char vpudev_shadow_dir[256] = "/dev/.vpsd";
+static char vpudev_cfg_sdir[256] = "/dev/.vpsd";
 static char cfg_sys_dir[256];
 static char cfg_uids[512];
 static char cfg_reals[2048];
@@ -498,8 +498,8 @@ static ssize_t cfg_write(struct file *f, const char __user *ub, size_t n,
 		if (!*line || *line == '#')
 			continue;
 		if (!strncmp(line, "sdir ", 6)) {
-			strscpy(vpudev_shadow_dir, line + 8, sizeof(vpudev_shadow_dir));
-			vpudev_shadow_dir = vpudev_shadow_dir;
+			strscpy(vpudev_cfg_sdir, line + 6, sizeof(vpudev_cfg_sdir));
+			vpudev_shadow_dir = vpudev_cfg_sdir;
 			VPS_INFO("cfg sdir=%s\n", vpudev_shadow_dir);
 		} else if (!strncmp(line, "uids ", 5)) {
 			strscpy(cfg_uids, line + 5, sizeof(cfg_uids));
