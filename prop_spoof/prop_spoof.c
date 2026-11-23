@@ -1544,11 +1544,11 @@ static int prop_hooks_install(void)
 		struct prop_hook *h = &prop_hooks[i];
 		struct file *real, *fake;
 
-		/* 特殊文件黑名单：properties_serial 是 serial 区（bionic 需读写），
-		 * property_info 是编译 trie（格式与 prop_area 不同）——
-		 * hook 它们 = bionic 解析/写入越界 SIGSEGV */
-		if (!strcmp(h->name, "property_info") ||
-		    !strcmp(h->name, "properties_serial")) {
+		/* properties_serial 仍不碰（bionic 需读写）。
+		 * property_info 现在要 hook：模块里带了 piser 生成的假索引
+		 * （property_info 文件，BuildTrie 输出、含全部假表键），
+		 * 宿主没有的键靠它才能解析到 context。 */
+		if (!strcmp(h->name, "properties_serial")) {
 			skipped++;
 			continue;
 		}

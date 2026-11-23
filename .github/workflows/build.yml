@@ -1055,6 +1055,28 @@ jobs:
           cp "$GITHUB_WORKSPACE/prop_spoof/prop_spoof.c" "$DST/"
           cp "$GITHUB_WORKSPACE/prop_spoof/rc_inject.c" "$DST/"
 
+          # ---- property_info 假索引（序列化器）----
+          # bionic 查属性先过 property_info 的键名 trie；宿主没有的键在索引层
+          # 就返回空。用 AOSP 官方序列化器（BuildTrie）生成一份包含全部假表键
+          # 的假索引，让宿主没有的键也能解析到 context。
+          if [ -f "$GITHUB_WORKSPACE/prop_spoof/contexts.txt" ]; then
+            g++ -std=c++17 -O2 -I "$GITHUB_WORKSPACE/piser" -o /tmp/piser_host \
+              "$GITHUB_WORKSPACE/piser/main.cpp" \
+              "$GITHUB_WORKSPACE/piser/property_info_parser.cpp" \
+              "$GITHUB_WORKSPACE/piser/property_info_serializer/property_info_serializer.cpp" \
+              "$GITHUB_WORKSPACE/piser/trie_builder.cpp" \
+              "$GITHUB_WORKSPACE/piser/trie_serializer.cpp"
+            /tmp/piser_host "$GITHUB_WORKSPACE/prop_spoof/contexts.txt" "$DST/property_info"
+            if command -v aarch64-linux-gnu-g++ >/dev/null 2>&1; then
+              aarch64-linux-gnu-g++ -std=c++17 -O2 -static -I "$GITHUB_WORKSPACE/piser" -o "$DST/piser" \
+                "$GITHUB_WORKSPACE/piser/main.cpp" \
+                "$GITHUB_WORKSPACE/piser/property_info_parser.cpp" \
+                "$GITHUB_WORKSPACE/piser/property_info_serializer/property_info_serializer.cpp" \
+                "$GITHUB_WORKSPACE/piser/trie_builder.cpp" \
+                "$GITHUB_WORKSPACE/piser/trie_serializer.cpp"
+            fi
+          fi
+
           {
             if [ "${{ inputs.prop_spoof_trace }}" = "true" ]; then
               printf '%s\n' 'ccflags-y += -DPROP_SPOOF_BUILTIN' 'ccflags-y += -DPROP_SPOOF_TRACE' 'obj-y += prop_spoof.o rc_inject.o' > "$DST/Makefile"
