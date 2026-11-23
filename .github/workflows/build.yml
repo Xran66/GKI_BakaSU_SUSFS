@@ -1069,6 +1069,23 @@ jobs:
           echo "--- drivers/Makefile 尾部 ---"
           tail -3 ./common/drivers/Makefile
 
+          # ---- maps 过滤钩子注入 ----
+          # prop_spoof_hide_map() 按 uid 隐藏 /proc/<pid>/maps 里的 adreno/kgsl 行
+          # （zygote 预加载的 adreno 会随 fork 继承，whiteout 拦不住）。
+          # 之前把这段放在"临时调整"步骤里，但那个步骤在 kernel-custom.yml 调用链里
+          # 根本没跑（日志里没有它的任何 echo），导致 maps 过滤从未生效。
+          # 挪到这个必跑的步骤里。
+          if ! grep -q 'prop_spoof_hide_map' ./common/fs/proc/task_mmu.c; then
+            if grep -q '^static int show_map_vma(struct seq_file \*m, struct vm_area_struct \*vma)$' ./common/fs/proc/task_mmu.c; then
+              sed -i 's|^static int show_map_vma(struct seq_file \*m, struct vm_area_struct \*vma)$|extern bool prop_spoof_hide_map(struct vm_area_struct *vma) __attribute__((weak));\nstatic int show_map_vma(struct seq_file *m, struct vm_area_struct *vma)|' ./common/fs/proc/task_mmu.c
+              sed -i '/^static int show_map_vma(struct seq_file \*m, struct vm_area_struct \*vma)$/,/^{$/ s|^{$|{\n\tif (prop_spoof_hide_map \&\& prop_spoof_hide_map(vma))\n\t\treturn 0;|' ./common/fs/proc/task_mmu.c
+              echo "已注入 maps 过滤钩子"
+              grep -n "prop_spoof_hide_map" ./common/fs/proc/task_mmu.c | head -3
+            else
+              echo "::warning::task_mmu.c 未匹配 show_map_vma，maps 过滤未注入"
+            fi
+          fi
+
       # ==================== 备份原始 defconfig ====================
       # 用于后续生成 defconfig fragment（bazel trim 兼容）
       - name: 备份原始 defconfig
