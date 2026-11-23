@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-// prop_spoof.c —— 定向属性表/cpuinfo 伪装内核模块（v2：LSM 按 app 补丁）
+// vps.c —— 定向属性表/cpuinfo 伪装内核模块（v2：LSM 按 app 补丁）
 //
 // v1 教训：
 //   · 全局 hook /dev/__properties__（i_fop/i_op 替换）会把 init.svc/sys.*
@@ -19,17 +19,17 @@
 //
 // 加载（无 ksud 依赖，post-fs-data 可直接 insmod；地址参数由加载脚本从
 // 当前开机 kallsyms 提取）：
-//   insmod prop_spoof.ko target_uid=10266 proc_root_addr=0x.. shh_addr=0x.. \
-//     fake_dir=/data/adb/prop_spoof/fake_props
+//   insmod vps.ko target_uid=10266 proc_root_addr=0x.. shh_addr=0x.. \
+//     fake_dir=/data/adb/vps/fake_props
 
 #include <linux/module.h>
 
 /* 日志策略：默认静默（防日志侧泄露）。错误走 pr_err；
  * 过程信息仅在 PROP_SPOOF_TRACE 构建下输出。 */
 #ifdef PROP_SPOOF_TRACE
-#define PS_INFO(fmt, ...) PS_INFO("" fmt, ##__VA_ARGS__)
+#define VPS_INFO(fmt, ...) VPS_INFO("" fmt, ##__VA_ARGS__)
 #else
-#define PS_INFO(fmt, ...) do { } while (0)
+#define VPS_INFO(fmt, ...) do { } while (0)
 #endif
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -66,7 +66,7 @@ MODULE_AUTHOR("");
  *   1. 不需要 kallsyms 地址参数：proc_root / security_hook_heads /
  *      filp_open 都是同一 vmlinux 的符号，链接器直接解析
  *   2. 参数不能从 insmod 命令行传：改为用户态脚本经
- *      /proc/prop_spoof_cfg 注入（fakedir / uids / build / start）
+ *      /proc/vps_cfg 注入（fakedir / uids / build / start）
  * 其余逻辑完全一致。
  * ================================================================== */
 #ifdef PROP_SPOOF_BUILTIN
@@ -128,7 +128,7 @@ static const struct modversion_info __module_versions[] __used
 /* ---- 模块参数 ---- */
 static int target_uid = -1;      /* 单目标 uid（-1 = 不用） */
 static char *target_uids = "";   /* 逗号分隔多 uid，来自 target_app.txt */
-static char *fake_dir = "/data/adb/prop_spoof/fake_props";
+static char *fake_dir = "/data/adb/vps/fake_props";
 static char *sys_fake_dir = "";  /* /sys CPU 拓扑假文件根（cpu_fake/sys） */
 static unsigned long proc_root_addr;  /* kallsyms: proc_root（未导出） */
 static unsigned long shh_addr;        /* kallsyms: security_hook_heads（未导出） */
@@ -224,7 +224,7 @@ __maybe_unused static void egl_shadow_mount(void)
 	if (!unshare_addr || !kern_path_addr || !path_mount_addr ||
 	    !path_put_addr || !ovr_cred_addr || !rev_cred_addr ||
 	    !init_cred_addr) {
-		pr_err("prop_spoof: egl 符号地址未指定\n");
+		pr_err("vps: egl 符号地址未指定\n");
 		return;
 	}
 	unshare_p = (unshare_fn)unshare_addr;
@@ -238,20 +238,20 @@ __maybe_unused static void egl_shadow_mount(void)
 	ret = unshare_p(EGL_CLONE_NEWNS);
 	if (ret) {
 		rev_p(old);
-		pr_err("prop_spoof: egl unshare 失败 %d\n", ret);
+		pr_err("vps: egl unshare 失败 %d\n", ret);
 		return;
 	}
 	ret = kern_path_p(egl_dst_dir, 1 /* LOOKUP_FOLLOW */, &dst);
 	if (ret) {
 		rev_p(old);
-		pr_err("prop_spoof: egl dst lookup 失败 %d\n", ret);
+		pr_err("vps: egl dst lookup 失败 %d\n", ret);
 		return;
 	}
 	ret = path_mount_p(egl_src_dir, &dst, NULL, EGL_MS_BIND, NULL);
 	path_put_p(&dst);
 	rev_p(old);
 	egl_ns_remember();
-	PS_INFO("egl shadow mount rc=%d ns=%px\n", ret,
+	VPS_INFO("egl shadow mount rc=%d ns=%px\n", ret,
 		current->nsproxy->mnt_ns);
 }
 module_param(sys_fake_dir, charp, 0);
@@ -393,9 +393,9 @@ static const struct proc_ops ctrl_ops = {
 };
 
 /* ==================================================================
- * 内建模式配置接口 /proc/prop_spoof_cfg
+ * 内建模式配置接口 /proc/vps_cfg
  * 用户态脚本（KSU 模块）在假属性区准备好之后写入：
- *   fakedir /dev/propspoof
+ *   fakedir /dev/.vpsd
  *   uids 10252,10242,10247
  *   build <真值;真值;...>|<假值;假值;...>
  *   start
@@ -403,7 +403,7 @@ static const struct proc_ops ctrl_ops = {
 #ifdef PROP_SPOOF_BUILTIN
 /* 前向声明（这些实体定义在本文件后部） */
 static int memx_dir_filter_install(const char *path);
-static void prop_spoof_map_hide_setup(void);
+static void vps_map_hide_setup(void);
 static int hook_install(void);
 static int prop_hooks_install(void);
 static int lsm_install(void);
@@ -413,7 +413,7 @@ static void build_pat_free(void);
 static char *build_reals;
 static char *build_fakes;
 
-static char cfg_fake_dir[256] = "/dev/propspoof";
+static char cfg_fake_dir[256] = "/dev/.vpsd";
 static char cfg_sys_dir[256];
 static char cfg_uids[512];
 static char cfg_reals[2048];
@@ -428,15 +428,15 @@ static int memx_dir_filter_mode;
 static bool prop_vma_enabled = true;
 
 /* proc 节点自毁：配置全部下发、假文件引用都已被内核持有之后，
- * 把 /proc/prop_spoof 和 /proc/prop_spoof_cfg 从 procfs 摘掉。
+ * 把 /proc/vps 和 /proc/vps_cfg 从 procfs 摘掉。
  * 目的：任何进程 ls /proc 都看不到这两个名字（名字本身就是线索）。
  * 为什么要延迟：不能在 cfg_write 自己的调用栈里 remove 正在写的文件。 */
 static void prop_hide_work_fn(struct work_struct *w)
 {
-	remove_proc_entry("prop_spoof", NULL);
-	remove_proc_entry("prop_spoof_cfg", NULL);
+	remove_proc_entry("vps", NULL);
+	remove_proc_entry("vps_cfg", NULL);
 	nodes_hidden = true;
-	PS_INFO("proc 节点已隐藏（重新配置需重启）\n");
+	VPS_INFO("proc 节点已隐藏（重新配置需重启）\n");
 }
 static DECLARE_DELAYED_WORK(prop_hide_work, prop_hide_work_fn);
 
@@ -481,16 +481,16 @@ static ssize_t cfg_write(struct file *f, const char __user *ub, size_t n,
 		if (!strncmp(line, "fakedir ", 8)) {
 			strscpy(cfg_fake_dir, line + 8, sizeof(cfg_fake_dir));
 			fake_dir = cfg_fake_dir;
-			PS_INFO("cfg fakedir=%s\n", fake_dir);
+			VPS_INFO("cfg fakedir=%s\n", fake_dir);
 		} else if (!strncmp(line, "uids ", 5)) {
 			strscpy(cfg_uids, line + 5, sizeof(cfg_uids));
 			target_uids = cfg_uids;
 			parse_target_uids();
-			PS_INFO("cfg uids=%s\n", target_uids);
+			VPS_INFO("cfg uids=%s\n", target_uids);
 		} else if (!strncmp(line, "sysdir ", 7)) {
 			strscpy(cfg_sys_dir, line + 7, sizeof(cfg_sys_dir));
 			sys_fake_dir = cfg_sys_dir;
-			PS_INFO("cfg sysdir=%s\n", sys_fake_dir);
+			VPS_INFO("cfg sysdir=%s\n", sys_fake_dir);
 		} else if (!strncmp(line, "build ", 6)) {
 			char *sep = strchr(line + 6, '|');
 			if (sep) {
@@ -501,9 +501,9 @@ static ssize_t cfg_write(struct file *f, const char __user *ub, size_t n,
 				build_fakes = cfg_fakes;
 				build_pat_free();
 				if (build_pat_parse())
-					pr_err("prop_spoof: cfg build 解析失败\n");
+					pr_err("vps: cfg build 解析失败\n");
 				else
-					PS_INFO("cfg build pairs 就绪\n");
+					VPS_INFO("cfg build pairs 就绪\n");
 			}
 		} else if (!strncmp(line, "verfile ", 8)) {
 			/* version 假串上传：/proc/version 对目标 uid 显示此内容 */
@@ -520,22 +520,22 @@ static ssize_t cfg_write(struct file *f, const char __user *ub, size_t n,
 				ver_buf = nv;
 				ver_len = vn + 1;
 				mutex_unlock(&fake_lock);
-				PS_INFO("verfile 已更新 len=%zu\n",
+				VPS_INFO("verfile 已更新 len=%zu\n",
 					ver_len);
 			}
 		} else if (!strncmp(line, "dirfilter ", 10)) {
 			memx_dir_filter_mode = line[10] - '0';
-			PS_INFO("cfg dirfilter=%d\n", memx_dir_filter_mode);
+			VPS_INFO("cfg dirfilter=%d\n", memx_dir_filter_mode);
 		} else if (!strncmp(line, "vma ", 4)) {
 			prop_vma_enabled = (line[4] != '0');
-			PS_INFO("cfg vma=%d\n", prop_vma_enabled);
+			VPS_INFO("cfg vma=%d\n", prop_vma_enabled);
 		} else if (!strcmp(line, "hide")) {
 			schedule_delayed_work(&prop_hide_work, 2 * HZ);
-			PS_INFO("cfg hide 已排程\n");
+			VPS_INFO("cfg hide 已排程\n");
 		} else if (!strcmp(line, "start")) {
 			int r;
 			if (builtin_started) {
-				PS_INFO("已启动，忽略重复 start\n");
+				VPS_INFO("已启动，忽略重复 start\n");
 				continue;
 			}
 			r = hook_install();
@@ -543,7 +543,7 @@ static ssize_t cfg_write(struct file *f, const char __user *ub, size_t n,
 				r = prop_hooks_install();
 			if (!r)
 				ver_hook_install();	/* 失败不阻断 start */
-			prop_spoof_map_hide_setup();
+			vps_map_hide_setup();
 			if (memx_dir_filter_mode == 1) {
 				memx_dir_filter_install("/sys/class");
 				memx_dir_filter_install("/sys/module");
@@ -553,10 +553,10 @@ static ssize_t cfg_write(struct file *f, const char __user *ub, size_t n,
 			if (!r)
 				r = lsm_install();
 			if (r) {
-				pr_err("prop_spoof: start 失败 %d\n", r);
+				pr_err("vps: start 失败 %d\n", r);
 			} else {
 				builtin_started = true;
-				PS_INFO("builtin start 完成\n");
+				VPS_INFO("builtin start 完成\n");
 			}
 		}
 	}
@@ -617,18 +617,18 @@ static int hook_install(void)
 {
 #ifndef PROP_SPOOF_BUILTIN
 	if (!proc_root_addr) {
-		pr_err("prop_spoof: proc_root_addr 未指定\n");
+		pr_err("vps: proc_root_addr 未指定\n");
 		return -EINVAL;
 	}
 #endif
 	cpuinfo_pde = find_cpuinfo_pde();
 	if (!cpuinfo_pde) {
-		pr_err("prop_spoof: 未找到 /proc/cpuinfo 的 PDE\n");
+		pr_err("vps: 未找到 /proc/cpuinfo 的 PDE\n");
 		return -EINVAL;
 	}
 	if (copy_from_kernel_nofault(&orig_ops_ptr, &cpuinfo_pde->proc_ops,
 				     sizeof(orig_ops_ptr)) || !orig_ops_ptr) {
-		pr_err("prop_spoof: 读取 cpuinfo proc_ops 失败\n");
+		pr_err("vps: 读取 cpuinfo proc_ops 失败\n");
 		cpuinfo_pde = NULL;
 		return -EINVAL;
 	}
@@ -638,14 +638,14 @@ static int hook_install(void)
 		return -EINVAL;
 	}
 	if (spoof_ops.proc_open == spoof_open) {
-		pr_err("prop_spoof: cpuinfo 已被本模块 hook\n");
+		pr_err("vps: cpuinfo 已被本模块 hook\n");
 		return -EINVAL;
 	}
 	spoof_ops.proc_open = spoof_open;
 	WRITE_ONCE(cpuinfo_pde->proc_ops, &spoof_ops);
 
 	hooked = true;
-	PS_INFO("cpuinfo hook 安装成功 target_uid=%d\n",
+	VPS_INFO("cpuinfo hook 安装成功 target_uid=%d\n",
 		target_uid);
 	return 0;
 }
@@ -655,7 +655,7 @@ static void hook_remove(void)
 	if (!hooked || !cpuinfo_pde)
 		return;
 	WRITE_ONCE(cpuinfo_pde->proc_ops, orig_ops_ptr);
-	PS_INFO("cpuinfo hook 已恢复\n");
+	VPS_INFO("cpuinfo hook 已恢复\n");
 	hooked = false;
 	cpuinfo_pde = NULL;
 }
@@ -760,7 +760,7 @@ static int memx_dir_filter_install(const char *path)
 
 	f = filp_open(path, O_RDONLY | O_DIRECTORY, 0);
 	if (IS_ERR(f)) {
-		PS_INFO("打开 %s 失败 %ld\n", path, PTR_ERR(f));
+		VPS_INFO("打开 %s 失败 %ld\n", path, PTR_ERR(f));
 		return -ENOENT;
 	}
 	h = &memx_dir_hooks[memx_dir_hook_count++];
@@ -802,7 +802,7 @@ __maybe_unused static void memx_dir_filter_remove(void)
  *
  * 挂在 fs/proc/task_mmu.c 的 show_map_vma() 开头（弱符号调用，非本配置
  * 编译时自动退化为不过滤）：
- *     if (prop_spoof_hide_map && prop_spoof_hide_map(vma)) return 0;
+ *     if (vps_hide_map && vps_hide_map(vma)) return 0;
  * ================================================================== */
 #define MAP_HIDE_MAX 16
 static struct inode *map_hide_inodes[MAP_HIDE_MAX];
@@ -812,7 +812,7 @@ static int map_hide_count;
  * 上一版在这里 kmalloc + d_path + strstr，直接把内核栈打爆
  * （console-ramoops: "Kernel panic - not syncing: kernel stack overflow"）。
  * 改成开机时把 adreno/kgsl 相关文件的 inode 抓下来，读 maps 时纯比较。 */
-bool prop_spoof_hide_map(struct vm_area_struct *vma)
+bool vps_hide_map(struct vm_area_struct *vma)
 {
 	struct inode *ino;
 	int i;
@@ -830,7 +830,7 @@ bool prop_spoof_hide_map(struct vm_area_struct *vma)
 	return false;
 }
 
-static void prop_spoof_map_hide_setup(void)
+static void vps_map_hide_setup(void)
 {
 	static const char *paths[] = {
 		"/vendor/lib64/egl/libGLESv2_adreno.so",
@@ -853,7 +853,7 @@ static void prop_spoof_map_hide_setup(void)
 		ihold(f->f_inode);
 		filp_close(f, NULL);
 	}
-	PS_INFO("maps 隐藏 inode=%d 个\n", map_hide_count);
+	VPS_INFO("maps 隐藏 inode=%d 个\n", map_hide_count);
 }
 
 /* ---- /proc/version 伪装：目标 uid 读到假串（对齐真机内核版本） ---- */
@@ -887,12 +887,12 @@ static int ver_hook_install(void)
 		return 0;	/* 假串未上传，静默跳过 */
 	ver_pde = find_proc_pde("version");
 	if (!ver_pde) {
-		pr_err("prop_spoof: 未找到 /proc/version 的 PDE\n");
+		pr_err("vps: 未找到 /proc/version 的 PDE\n");
 		return -ENOENT;
 	}
 	if (copy_from_kernel_nofault(&ops, &ver_pde->proc_ops,
 				     sizeof(ops))) {
-		pr_err("prop_spoof: 读取 version proc_ops 失败\n");
+		pr_err("vps: 读取 version proc_ops 失败\n");
 		ver_pde = NULL;
 		return -EFAULT;
 	}
@@ -905,7 +905,7 @@ static int ver_hook_install(void)
 	ver_spoof_ops.proc_open = ver_spoof_open;
 	WRITE_ONCE(ver_pde->proc_ops, &ver_spoof_ops);
 	ver_hooked = true;
-	PS_INFO("version hook 安装成功 len=%zu\n", ver_len);
+	VPS_INFO("version hook 安装成功 len=%zu\n", ver_len);
 	return 0;
 }
 
@@ -1067,7 +1067,7 @@ __maybe_unused static void patch_target_mm(void)
 	}
 	up_write(&mm->mmap_lock);
 
-	PS_INFO("uid=%d vma 迁移完成 patched=%d skipped=%d vma_enabled=%d\n",
+	VPS_INFO("uid=%d vma 迁移完成 patched=%d skipped=%d vma_enabled=%d\n",
 		target_uid, patched, skipped, prop_vma_enabled);
 }
 
@@ -1164,7 +1164,7 @@ static int build_pat_parse(void)
 		int cap8 = (((16 + br_len[i] + 1) + 7) & ~7) - 17;
 
 		if (bf_len[i] > cap8) {
-			pr_warn("prop_spoof: build[%d] 假值(%d)超过槽位上限(%d)，跳过\n",
+			pr_warn("vps: build[%d] 假值(%d)超过槽位上限(%d)，跳过\n",
 				i, bf_len[i], cap8);
 			br_len[i] = -1;
 			continue;
@@ -1186,10 +1186,10 @@ static int build_pat_parse(void)
 		}
 	}
 	build_pat_count = n;
-	PS_INFO("build 改写对 %d 组\n", n);
+	VPS_INFO("build 改写对 %d 组\n", n);
 	return 0;
 mismatch:
-	pr_err("prop_spoof: build_reals/build_fakes 数量不匹配\n");
+	pr_err("vps: build_reals/build_fakes 数量不匹配\n");
 	return -EINVAL;
 }
 
@@ -1257,7 +1257,7 @@ static int build_patch_one(unsigned long data_addr, int p, int is_u16)
 
 			(void)copy_from_user(&d4, (void __user *)(data_addr - 4), 4);
 			(void)copy_from_user(&d8, (void __user *)(data_addr - 8), 4);
-			PS_INFO("dbg bhit p=%d c4=%08x c8=%08x u16=%d\n",
+			VPS_INFO("dbg bhit p=%d c4=%08x c8=%08x u16=%d\n",
 				p, d4, d8, is_u16);
 			dbg_reject++;
 		}
@@ -1403,7 +1403,7 @@ __maybe_unused static int patch_build_heap(void)
 	up_read(&current->mm->mmap_lock);
 
 	kvfree(buf);
-	PS_INFO("uid=%d build 堆改写 %d 处 (dalvik 空间 %luMB)\n",
+	VPS_INFO("uid=%d build 堆改写 %d 处 (dalvik 空间 %luMB)\n",
 		from_kuid_munged(&init_user_ns, current_uid()),
 		patched, scanned >> 20);
 	return patched;
@@ -1426,7 +1426,7 @@ static int lsm_file_open(struct file *file)
 			pp = dentry_path_raw(file->f_path.dentry, tp, sizeof(tp));
 			if (!IS_ERR(pp)) {
 				trace_n++;
-				PS_INFO("trace uid=%d open %s
+				VPS_INFO("trace uid=%d open %s
 ",
 					__kuid_val(current_uid()), pp);
 			}
@@ -1512,7 +1512,7 @@ static int prop_hooks_install(void)
 	fo = (filp_open_fn)filp_open;
 #else
 	if (!filp_open_addr) {
-		pr_err("prop_spoof: filp_open_addr 未指定\n");
+		pr_err("vps: filp_open_addr 未指定\n");
 		return -EINVAL;
 	}
 	fo = (filp_open_fn)filp_open_addr;
@@ -1522,13 +1522,13 @@ static int prop_hooks_install(void)
 	snprintf(path, sizeof(path), "/dev/__properties__");
 	dir = fo(path, O_RDONLY | O_DIRECTORY, 0);
 	if (IS_ERR(dir)) {
-		pr_err("prop_spoof: 打开 %s 失败\n", path);
+		pr_err("vps: 打开 %s 失败\n", path);
 		return -EINVAL;
 	}
 	iterate_dir(dir, &prop_dir_ctx);
 	filp_close(dir, NULL);
 	if (prop_hook_count == 0) {
-		pr_err("prop_spoof: 属性目录为空\n");
+		pr_err("vps: 属性目录为空\n");
 		return -EINVAL;
 	}
 
@@ -1576,7 +1576,7 @@ static int prop_hooks_install(void)
 		prepped++;
 	}
 
-	PS_INFO("属性表就绪 files=%d prepped=%d skipped=%d (fake_dir=%s)\n",
+	VPS_INFO("属性表就绪 files=%d prepped=%d skipped=%d (fake_dir=%s)\n",
 		prop_hook_count, prepped, skipped, fake_dir);
 
 	/* ---- /sys CPU 拓扑/频率伪装（v2.4 全套：cpu0-7 + policy） ---- */
@@ -1699,7 +1699,7 @@ static int prop_hooks_install(void)
 				sprep++;
 			}
 		}
-		PS_INFO("/sys cpu 伪装就绪 prepped=%d (sys_fake_dir=%s)\n",
+		VPS_INFO("/sys cpu 伪装就绪 prepped=%d (sys_fake_dir=%s)\n",
 			sprep, sys_fake_dir);
 
 		/* ---- soc0 通用属性伪造 ----
@@ -1757,7 +1757,7 @@ static int prop_hooks_install(void)
 				filp_close(real0, NULL);
 				s0++;
 			}
-			PS_INFO("/sys soc0 伪装就绪 prepped=%d\n", s0);
+			VPS_INFO("/sys soc0 伪装就绪 prepped=%d\n", s0);
 
 		/* ---- /proc 里的三个"文件级"探针：version / cmdline / interrupts ----
 		 * 不走 PDE（6.6 上 find_proc_pde("version") 返回 NULL），直接用
@@ -1792,7 +1792,7 @@ static int prop_hooks_install(void)
 				if (IS_ERR(fakep)) {
 					filp_close(realp, NULL);
 					skipped++;
-					PS_INFO("缺假文件 %s/proc/%s\n",
+					VPS_INFO("缺假文件 %s/proc/%s\n",
 						sys_fake_dir, proc_files[j]);
 					continue;
 				}
@@ -1806,7 +1806,7 @@ static int prop_hooks_install(void)
 				filp_close(realp, NULL);
 				p0++;
 			}
-			PS_INFO("/proc 文件伪装就绪 prepped=%d\n", p0);
+			VPS_INFO("/proc 文件伪装就绪 prepped=%d\n", p0);
 
 		/* ---- /sys/class/thermal/thermal_zoneN/type ----
 		 * 真机是 ap_ntc / apu-a0 …，宿主是 aoss / aoss-0，一眼骁龙。
@@ -1842,7 +1842,7 @@ static int prop_hooks_install(void)
 				filp_close(realt, NULL);
 				t0++;
 			}
-			PS_INFO("thermal type 伪装就绪 prepped=%d\n", t0);
+			VPS_INFO("thermal type 伪装就绪 prepped=%d\n", t0);
 		}
 		}
 		}
@@ -1891,7 +1891,7 @@ static int prop_hooks_install(void)
 				filp_close(real0, NULL);
 				d0++;
 			}
-			PS_INFO("device-tree 伪装就绪 prepped=%d\n", d0);
+			VPS_INFO("device-tree 伪装就绪 prepped=%d\n", d0);
 		}
 	}
 
@@ -1944,7 +1944,7 @@ static int lsm_install(void)
 
 #ifndef PROP_SPOOF_BUILTIN
 	if (!shh_addr) {
-		pr_err("prop_spoof: shh_addr 未指定\n");
+		pr_err("vps: shh_addr 未指定\n");
 		return -EINVAL;
 	}
 #endif
@@ -1952,7 +1952,7 @@ static int lsm_install(void)
 
 	prop_lsm_hook.head = head;
 	prop_lsm_hook.hook.task_fix_setuid = lsm_task_fix_setuid;
-	prop_lsm_hook.lsm = "prop_spoof";
+	prop_lsm_hook.lsm = "vps";
 	prop_lsm_hook.list.next = NULL;
 	INIT_HLIST_NODE(&prop_lsm_hook.list);
 
@@ -1965,7 +1965,7 @@ static int lsm_install(void)
 		prop_lsm_hook.list.pprev = &last->next;
 		if (write_u64_via_alias((unsigned long)&last->next,
 					(unsigned long)&prop_lsm_hook.list)) {
-			pr_err("prop_spoof: 别名写入失败（挂载）\n");
+			pr_err("vps: 别名写入失败（挂载）\n");
 			return -ENOMEM;
 		}
 	} else {
@@ -1973,12 +1973,12 @@ static int lsm_install(void)
 		prop_lsm_hook.list.pprev = (struct hlist_node **)&head->first;
 		if (write_u64_via_alias((unsigned long)&head->first,
 					(unsigned long)&prop_lsm_hook.list)) {
-			pr_err("prop_spoof: 别名写入失败（挂载空表）\n");
+			pr_err("vps: 别名写入失败（挂载空表）\n");
 			return -ENOMEM;
 		}
 	}
 	lsm_hook_linked = &prop_lsm_hook.list;
-	PS_INFO("LSM task_fix_setuid hook 已挂载\n");
+	VPS_INFO("LSM task_fix_setuid hook 已挂载\n");
 
 	/* ---- file_open 钩子 ---- */
 	{
@@ -1987,7 +1987,7 @@ static int lsm_install(void)
 
 		prop_lsm_hook_open.head = ohead;
 		prop_lsm_hook_open.hook.file_open = lsm_file_open;
-		prop_lsm_hook_open.lsm = "prop_spoof";
+		prop_lsm_hook_open.lsm = "vps";
 		prop_lsm_hook_open.list.next = NULL;
 		INIT_HLIST_NODE(&prop_lsm_hook_open.list);
 		for (on2 = ohead->first; on2; on2 = on2->next)
@@ -1996,7 +1996,7 @@ static int lsm_install(void)
 			prop_lsm_hook_open.list.pprev = &on->next;
 			if (write_u64_via_alias((unsigned long)&on->next,
 					(unsigned long)&prop_lsm_hook_open.list)) {
-				pr_err("prop_spoof: file_open 钩子挂载失败\n");
+				pr_err("vps: file_open 钩子挂载失败\n");
 				return -ENOMEM;
 			}
 		} else {
@@ -2004,11 +2004,11 @@ static int lsm_install(void)
 				(struct hlist_node **)&ohead->first;
 			if (write_u64_via_alias((unsigned long)&ohead->first,
 					(unsigned long)&prop_lsm_hook_open.list)) {
-				pr_err("prop_spoof: file_open 钩子挂载失败(空表)\n");
+				pr_err("vps: file_open 钩子挂载失败(空表)\n");
 				return -ENOMEM;
 			}
 		}
-		PS_INFO("LSM file_open hook 已挂载\n");
+		VPS_INFO("LSM file_open hook 已挂载\n");
 	}
 	return 0;
 }
@@ -2073,13 +2073,13 @@ static void lsm_remove(void)
 	}
 	synchronize_rcu();
 	lsm_hook_linked = NULL;
-	PS_INFO("LSM hook 已摘除\n");
+	VPS_INFO("LSM hook 已摘除\n");
 }
 
 #else	/* !PROP_LSM_OK: 6.12+ LSM static_call 架构，链表挂钩不可用 */
 static int lsm_install(void)
 {
-	PS_INFO("6.12+ 无 LSM 链表，per-uid 文件重定向改走 SUSFS open_redirect\n");
+	VPS_INFO("6.12+ 无 LSM 链表，per-uid 文件重定向改走 SUSFS open_redirect\n");
 	return 0;
 }
 
@@ -2088,7 +2088,7 @@ static void lsm_remove(void)
 }
 #endif	/* PROP_LSM_OK */
 
-static int __init prop_spoof_init(void)
+static int __init vps_init(void)
 {
 #ifndef PROP_SPOOF_BUILTIN
 	int ret;
@@ -2097,20 +2097,20 @@ static int __init prop_spoof_init(void)
 #ifdef PROP_SPOOF_BUILTIN
 	/* 内建：initcall 早于用户态，假属性区还没生成。
 	 * 这里只建控制节点，等脚本准备好假文件后写 "start" 触发 */
-	if (!proc_create("prop_spoof", 0600, NULL, &ctrl_ops))
+	if (!proc_create("vps", 0600, NULL, &ctrl_ops))
 		return -ENOMEM;
-	if (!proc_create("prop_spoof_cfg", 0600, NULL, &cfg_ops)) {
-		remove_proc_entry("prop_spoof", NULL);
+	if (!proc_create("vps_cfg", 0600, NULL, &cfg_ops)) {
+		remove_proc_entry("vps", NULL);
 		return -ENOMEM;
 	}
-	PS_INFO("builtin 已注册，等待 cfg start\n");
+	VPS_INFO("builtin 已注册，等待 cfg start\n");
 	return 0;
 #else
 	parse_target_uids();
 	ret = build_pat_parse();
 	if (ret)
 		return ret;
-	if (!proc_create("prop_spoof", 0600, NULL, &ctrl_ops)) {
+	if (!proc_create("vps", 0600, NULL, &ctrl_ops)) {
 		build_pat_free();
 		return -ENOMEM;
 	}
@@ -2130,13 +2130,13 @@ err3:
 err2:
 	hook_remove();
 err:
-	remove_proc_entry("prop_spoof", NULL);
+	remove_proc_entry("vps", NULL);
 	build_pat_free();
 	return ret;
 #endif
 }
 
-static void __exit prop_spoof_exit(void)
+static void __exit vps_exit(void)
 {
 #ifdef PROP_SPOOF_BUILTIN
 	cancel_delayed_work_sync(&prop_hide_work);
@@ -2147,11 +2147,11 @@ static void __exit prop_spoof_exit(void)
 	ver_hook_remove();
 #ifdef PROP_SPOOF_BUILTIN
 	if (!nodes_hidden) {
-		remove_proc_entry("prop_spoof", NULL);
-		remove_proc_entry("prop_spoof_cfg", NULL);
+		remove_proc_entry("vps", NULL);
+		remove_proc_entry("vps_cfg", NULL);
 	}
 #else
-	remove_proc_entry("prop_spoof", NULL);
+	remove_proc_entry("vps", NULL);
 #endif
 	mutex_lock(&fake_lock);
 	vfree(fake_buf);
@@ -2163,14 +2163,14 @@ static void __exit prop_spoof_exit(void)
 	build_pat_free();
 }
 
-module_init(prop_spoof_init);
-module_exit(prop_spoof_exit);
+module_init(vps_init);
+module_exit(vps_exit);
 
 #ifndef PROP_SPOOF_BUILTIN
 /* clean.ko 本地编译：手工提供 this_module 节（内建时由内核自身提供） */
 struct module __this_module
 	__attribute__((section(".gnu.linkonce.this_module"), aligned(64))) = {
-	.name = "prop_spoof",
+	.name = "vps",
 	.init = init_module,
 #ifdef CONFIG_MODULE_UNLOAD
 	.exit = cleanup_module,
