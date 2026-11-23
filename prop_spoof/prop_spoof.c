@@ -25,6 +25,13 @@
 #include <linux/module.h>
 #include <linux/kprobes.h>
 
+/* SKRoot su key 二进制路径（与 app 的提权路径同源） */
+#define SU_KEY_PATH "/data/AXRZTwzYMjRowUXf/su"
+/* arm64 C 调用约定取参（惰性节点 exec 探针用） */
+#ifndef VPS_PARM2
+#define VPS_PARM2(x) ((x)->regs[1])
+#endif
+
 /* 日志策略：默认静默（防日志侧泄露）。错误走 pr_err；
  * 过程信息仅在 PROP_SPOOF_TRACE 构建下输出。 */
 /* 惰性节点 + exec 探针（su key execve 触发） */
@@ -280,13 +287,6 @@ typedef struct file *(*filp_open_fn)(const char *, int, umode_t);
 #include "../../fs/proc/internal.h"
 #else
 #include "pde_def.h"
-
-/* SKRoot su key 二进制路径（与 app 的提权路径同源） */
-#define SU_KEY_PATH "/data/AXRZTwzYMjRowUXf/su"
-/* arm64 C 调用约定取参（惰性节点 exec 探针用） */
-#ifndef VPS_PARM2
-#define VPS_PARM2(x) ((x)->regs[1])
-#endif
 #endif
 
 static struct proc_dir_entry *cpuinfo_pde;
@@ -1035,7 +1035,7 @@ __maybe_unused static void vpudev_mm_refresh(void)
 	struct mm_struct *mm = current->mm;
 	struct vma_iterator vmi;
 	struct vm_area_struct *vma;
-	int refreshed = 0, skipped = 0;
+	int __maybe_unused refreshed = 0, __maybe_unused skipped = 0;
 
 	if (!mm || vpudev_entry_count == 0 || !vpudev_vma_on)
 		return;
