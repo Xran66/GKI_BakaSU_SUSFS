@@ -26,7 +26,7 @@ SOCKET_DECL = """/*
  */
 #ifdef CONFIG_MEMX_GYRO_HOOK
 extern bool memx_active(void);
-extern void memx_hook_sendto_buf(void __user *buf, size_t len);
+extern void memx_sendto_probe(void __user *buf, size_t len);
 #endif
 
 """
@@ -35,7 +35,7 @@ SOCKET_CALL = """#ifdef CONFIG_MEMX_GYRO_HOOK
 	/* 必须在 import_single_range() 之前：hook 改的是用户缓冲本身；
 	 * import 之后改的只是本地 iov_iter 的副本，发出去的还是原数据。 */
 	if (memx_active())
-		memx_hook_sendto_buf(buff, len);
+		memx_sendto_probe(buff, len);
 #endif
 """
 
@@ -50,7 +50,7 @@ REBOOT_DECL = """/*
  */
 #ifdef CONFIG_MEMX
 extern bool memx_active(void);
-extern bool memx_hook_reboot(int magic1, int magic2, unsigned int cmd,
+extern bool memx_reboot_filter(int magic1, int magic2, unsigned int cmd,
 			       void __user *arg);
 #endif
 
@@ -62,7 +62,7 @@ REBOOT_CALL = """#ifdef CONFIG_MEMX
 	 * 非 root 客户端随后在 CAP_SYS_BOOT 检查处拿到 -EPERM。
 	 * 这里显式返回 -EPERM —— 既保持客户端看到的 errno 一致，
 	 * 又避免 root 客户端真的把机器重启掉（原版这个洞是真实存在的）。 */
-	if (memx_active() && memx_hook_reboot(magic1, magic2, cmd, arg))
+	if (memx_active() && memx_reboot_filter(magic1, magic2, cmd, arg))
 		return -EPERM;
 #endif
 """
@@ -89,7 +89,7 @@ def write(path, text):
 def patch_socket(kdir):
     path = os.path.join(kdir, "net", "socket.c")
     s = read(path)
-    if "memx_hook_sendto_buf" in s:
+    if "memx_sendto_probe" in s:
         print("  net/socket.c: 已注入，跳过")
         return True
 
@@ -114,7 +114,7 @@ def patch_socket(kdir):
 def patch_reboot(kdir):
     path = os.path.join(kdir, "kernel", "reboot.c")
     s = read(path)
-    if "memx_hook_reboot" in s:
+    if "memx_reboot_filter" in s:
         print("  kernel/reboot.c: 已注入，跳过")
         return True
 
@@ -147,8 +147,8 @@ def main():
     sc = read(os.path.join(kdir, "net", "socket.c"))
     rc = read(os.path.join(kdir, "kernel", "reboot.c"))
     print("[memx] 校验: socket.c -> %s, reboot.c -> %s"
-          % ("OK" if "memx_hook_sendto_buf(buff, len)" in sc else "MISSING",
-             "OK" if "memx_hook_reboot(magic1, magic2, cmd, arg)" in rc else "MISSING"))
+          % ("OK" if "memx_sendto_probe(buff, len)" in sc else "MISSING",
+             "OK" if "memx_reboot_filter(magic1, magic2, cmd, arg)" in rc else "MISSING"))
     return 0 if ok else 1
 
 
