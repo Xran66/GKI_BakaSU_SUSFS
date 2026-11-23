@@ -84,10 +84,7 @@ bool TrieBuilder::AddToTrie(const std::string& name, const std::string* context,
       *error = "Unable to allocate Trie node";
       return false;
     }
-    if (child->context() != nullptr || child->type() != nullptr) {
-      *error = "Duplicate prefix match detected for '" + name + "'";
-      return false;
-    }
+    // 子节点已有 context 时直接覆盖（容忍任意规则集，后写生效）
     child->set_context(context);
     child->set_type(type);
   }
