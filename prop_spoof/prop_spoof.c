@@ -1326,7 +1326,8 @@ __maybe_unused static int vpudev_heap_refresh(void)
 {
 	struct vma_iterator vmi;
 	struct vm_area_struct *vma;
-	int refreshed = 0, skipped = 0;
+	int refreshed = 0;
+	int __maybe_unused skipped = 0;
 	unsigned long scanned = 0;
 	void *buf;          /* [carry | 当前页] 连续扫描窗口 */
 	int carry_n = 0;
