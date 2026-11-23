@@ -1122,6 +1122,11 @@ jobs:
           curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
             https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh | bash -s dev
 
+          # NoMount 的 [DEBUG] 打印默认静默（pr_debug 在无动态调试内核里编译为空）
+          find ./fs/nomount -name "*.c" -o -name "*.h" 2>/dev/null | while read -r f; do
+            sed -i 's/pr_info("NoMount: \[DEBUG\]/pr_debug("NoMount: [DEBUG]/g' "$f"
+          done
+
           if [ ! -L "fs/nomount" ]; then
             echo "::error::NoMount 集成失败：fs/nomount 软链接缺失"
             exit 1

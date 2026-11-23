@@ -26,6 +26,13 @@
 #include <asm/current.h>
 #include <asm/ptrace.h>
 
+/* 与 prop_spoof 同策略：默认静默 */
+#ifdef PROP_SPOOF_TRACE
+#define RC_INFO(fmt, ...) pr_info("prop_spoof: " fmt, ##__VA_ARGS__)
+#else
+#define RC_INFO(fmt, ...) do { } while (0)
+#endif
+
 /* arm64 C 调用约定取参（参照 KernelSU arch.h） */
 #ifndef PT_REGS_PARM1
 #define PT_REGS_PARM1(x) ((x)->regs[0])
@@ -137,7 +144,7 @@ int nm_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr,
 	*buf_ptr = buf + rc_count;
 	*count_ptr = count - rc_count;
 
-	pr_info("prop_spoof: init.rc 注入完成（%s, rc=%zu 字节）\n", dpath,
+	RC_INFO("init.rc 注入完成（%s, rc=%zu 字节）\n", dpath,
 		rc_count);
 
 	/* 拆 kprobe（延迟到 workqueue，避免 kprobe 上下文里直接注销） */
@@ -149,7 +156,7 @@ int nm_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr,
 static void rc_inject_uninstall(struct work_struct *work)
 {
 	unregister_kprobe(&vfs_read_kp);
-	pr_info("prop_spoof: vfs_read kprobe 已拆除\n");
+	RC_INFO("vfs_read kprobe 已拆除\n");
 }
 static DECLARE_WORK(rc_uninstall_work, rc_inject_uninstall);
 
@@ -172,7 +179,7 @@ static int __init rc_inject_init(void)
 {
 	int ret = register_kprobe(&vfs_read_kp);
 
-	pr_info("prop_spoof: vfs_read kprobe 注册 %d（等待 init 读 atrace.rc）\n",
+	RC_INFO("vfs_read kprobe 注册 %d（等待 init 读 atrace.rc）\n",
 		ret);
 	return 0;
 }

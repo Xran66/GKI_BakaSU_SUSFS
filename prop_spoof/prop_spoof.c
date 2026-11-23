@@ -23,6 +23,14 @@
 //     fake_dir=/data/adb/prop_spoof/fake_props
 
 #include <linux/module.h>
+
+/* 日志策略：默认静默（防日志侧泄露）。错误走 pr_err；
+ * 过程信息仅在 PROP_SPOOF_TRACE 构建下输出。 */
+#ifdef PROP_SPOOF_TRACE
+#define PS_INFO(fmt, ...) PS_INFO("" fmt, ##__VA_ARGS__)
+#else
+#define PS_INFO(fmt, ...) do { } while (0)
+#endif
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/proc_fs.h>
@@ -243,7 +251,7 @@ __maybe_unused static void egl_shadow_mount(void)
 	path_put_p(&dst);
 	rev_p(old);
 	egl_ns_remember();
-	pr_info("prop_spoof: egl shadow mount rc=%d ns=%px\n", ret,
+	PS_INFO("egl shadow mount rc=%d ns=%px\n", ret,
 		current->nsproxy->mnt_ns);
 }
 module_param(sys_fake_dir, charp, 0);
@@ -428,7 +436,7 @@ static void prop_hide_work_fn(struct work_struct *w)
 	remove_proc_entry("prop_spoof", NULL);
 	remove_proc_entry("prop_spoof_cfg", NULL);
 	nodes_hidden = true;
-	pr_info("prop_spoof: proc 节点已隐藏（重新配置需重启）\n");
+	PS_INFO("proc 节点已隐藏（重新配置需重启）\n");
 }
 static DECLARE_DELAYED_WORK(prop_hide_work, prop_hide_work_fn);
 
@@ -473,16 +481,16 @@ static ssize_t cfg_write(struct file *f, const char __user *ub, size_t n,
 		if (!strncmp(line, "fakedir ", 8)) {
 			strscpy(cfg_fake_dir, line + 8, sizeof(cfg_fake_dir));
 			fake_dir = cfg_fake_dir;
-			pr_info("prop_spoof: cfg fakedir=%s\n", fake_dir);
+			PS_INFO("cfg fakedir=%s\n", fake_dir);
 		} else if (!strncmp(line, "uids ", 5)) {
 			strscpy(cfg_uids, line + 5, sizeof(cfg_uids));
 			target_uids = cfg_uids;
 			parse_target_uids();
-			pr_info("prop_spoof: cfg uids=%s\n", target_uids);
+			PS_INFO("cfg uids=%s\n", target_uids);
 		} else if (!strncmp(line, "sysdir ", 7)) {
 			strscpy(cfg_sys_dir, line + 7, sizeof(cfg_sys_dir));
 			sys_fake_dir = cfg_sys_dir;
-			pr_info("prop_spoof: cfg sysdir=%s\n", sys_fake_dir);
+			PS_INFO("cfg sysdir=%s\n", sys_fake_dir);
 		} else if (!strncmp(line, "build ", 6)) {
 			char *sep = strchr(line + 6, '|');
 			if (sep) {
@@ -495,7 +503,7 @@ static ssize_t cfg_write(struct file *f, const char __user *ub, size_t n,
 				if (build_pat_parse())
 					pr_err("prop_spoof: cfg build 解析失败\n");
 				else
-					pr_info("prop_spoof: cfg build pairs 就绪\n");
+					PS_INFO("cfg build pairs 就绪\n");
 			}
 		} else if (!strncmp(line, "verfile ", 8)) {
 			/* version 假串上传：/proc/version 对目标 uid 显示此内容 */
@@ -512,22 +520,22 @@ static ssize_t cfg_write(struct file *f, const char __user *ub, size_t n,
 				ver_buf = nv;
 				ver_len = vn + 1;
 				mutex_unlock(&fake_lock);
-				pr_info("prop_spoof: verfile 已更新 len=%zu\n",
+				PS_INFO("verfile 已更新 len=%zu\n",
 					ver_len);
 			}
 		} else if (!strncmp(line, "dirfilter ", 10)) {
 			memx_dir_filter_mode = line[10] - '0';
-			pr_info("prop_spoof: cfg dirfilter=%d\n", memx_dir_filter_mode);
+			PS_INFO("cfg dirfilter=%d\n", memx_dir_filter_mode);
 		} else if (!strncmp(line, "vma ", 4)) {
 			prop_vma_enabled = (line[4] != '0');
-			pr_info("prop_spoof: cfg vma=%d\n", prop_vma_enabled);
+			PS_INFO("cfg vma=%d\n", prop_vma_enabled);
 		} else if (!strcmp(line, "hide")) {
 			schedule_delayed_work(&prop_hide_work, 2 * HZ);
-			pr_info("prop_spoof: cfg hide 已排程\n");
+			PS_INFO("cfg hide 已排程\n");
 		} else if (!strcmp(line, "start")) {
 			int r;
 			if (builtin_started) {
-				pr_info("prop_spoof: 已启动，忽略重复 start\n");
+				PS_INFO("已启动，忽略重复 start\n");
 				continue;
 			}
 			r = hook_install();
@@ -548,7 +556,7 @@ static ssize_t cfg_write(struct file *f, const char __user *ub, size_t n,
 				pr_err("prop_spoof: start 失败 %d\n", r);
 			} else {
 				builtin_started = true;
-				pr_info("prop_spoof: builtin start 完成\n");
+				PS_INFO("builtin start 完成\n");
 			}
 		}
 	}
@@ -637,7 +645,7 @@ static int hook_install(void)
 	WRITE_ONCE(cpuinfo_pde->proc_ops, &spoof_ops);
 
 	hooked = true;
-	pr_info("prop_spoof: cpuinfo hook 安装成功 target_uid=%d\n",
+	PS_INFO("cpuinfo hook 安装成功 target_uid=%d\n",
 		target_uid);
 	return 0;
 }
@@ -647,7 +655,7 @@ static void hook_remove(void)
 	if (!hooked || !cpuinfo_pde)
 		return;
 	WRITE_ONCE(cpuinfo_pde->proc_ops, orig_ops_ptr);
-	pr_info("prop_spoof: cpuinfo hook 已恢复\n");
+	PS_INFO("cpuinfo hook 已恢复\n");
 	hooked = false;
 	cpuinfo_pde = NULL;
 }
@@ -752,7 +760,7 @@ static int memx_dir_filter_install(const char *path)
 
 	f = filp_open(path, O_RDONLY | O_DIRECTORY, 0);
 	if (IS_ERR(f)) {
-		pr_info("prop_spoof: 打开 %s 失败 %ld\n", path, PTR_ERR(f));
+		PS_INFO("打开 %s 失败 %ld\n", path, PTR_ERR(f));
 		return -ENOENT;
 	}
 	h = &memx_dir_hooks[memx_dir_hook_count++];
@@ -845,7 +853,7 @@ static void prop_spoof_map_hide_setup(void)
 		ihold(f->f_inode);
 		filp_close(f, NULL);
 	}
-	pr_info("prop_spoof: maps 隐藏 inode=%d 个\n", map_hide_count);
+	PS_INFO("maps 隐藏 inode=%d 个\n", map_hide_count);
 }
 
 /* ---- /proc/version 伪装：目标 uid 读到假串（对齐真机内核版本） ---- */
@@ -897,7 +905,7 @@ static int ver_hook_install(void)
 	ver_spoof_ops.proc_open = ver_spoof_open;
 	WRITE_ONCE(ver_pde->proc_ops, &ver_spoof_ops);
 	ver_hooked = true;
-	pr_info("prop_spoof: version hook 安装成功 len=%zu\n", ver_len);
+	PS_INFO("version hook 安装成功 len=%zu\n", ver_len);
 	return 0;
 }
 
@@ -1059,7 +1067,7 @@ __maybe_unused static void patch_target_mm(void)
 	}
 	up_write(&mm->mmap_lock);
 
-	pr_info("prop_spoof: uid=%d vma 迁移完成 patched=%d skipped=%d vma_enabled=%d\n",
+	PS_INFO("uid=%d vma 迁移完成 patched=%d skipped=%d vma_enabled=%d\n",
 		target_uid, patched, skipped, prop_vma_enabled);
 }
 
@@ -1178,7 +1186,7 @@ static int build_pat_parse(void)
 		}
 	}
 	build_pat_count = n;
-	pr_info("prop_spoof: build 改写对 %d 组\n", n);
+	PS_INFO("build 改写对 %d 组\n", n);
 	return 0;
 mismatch:
 	pr_err("prop_spoof: build_reals/build_fakes 数量不匹配\n");
@@ -1249,7 +1257,7 @@ static int build_patch_one(unsigned long data_addr, int p, int is_u16)
 
 			(void)copy_from_user(&d4, (void __user *)(data_addr - 4), 4);
 			(void)copy_from_user(&d8, (void __user *)(data_addr - 8), 4);
-			pr_info("prop_spoof: dbg bhit p=%d c4=%08x c8=%08x u16=%d\n",
+			PS_INFO("dbg bhit p=%d c4=%08x c8=%08x u16=%d\n",
 				p, d4, d8, is_u16);
 			dbg_reject++;
 		}
@@ -1351,7 +1359,7 @@ __maybe_unused static int patch_build_heap(void)
 				if (dbg_vmas < 4 && pages == 0) {
 					u8 *b = buf;
 
-					pr_info("prop_spoof: dbg vma[%d]=%s first=%02x%02x%02x%02x%02x%02x%02x%02x\n",
+					PS_INFO("dbg vma[%d]=%s first=%02x%02x%02x%02x%02x%02x%02x%02x\n",
 						dbg_vmas, nm, b[0], b[1], b[2],
 						b[3], b[4], b[5], b[6], b[7]);
 					dbg_vmas++;
@@ -1404,7 +1412,7 @@ __maybe_unused static int patch_build_heap(void)
 	up_read(&current->mm->mmap_lock);
 
 	kvfree(buf);
-	pr_info("prop_spoof: uid=%d build 堆改写 %d 处 (dalvik 空间 %luMB)\n",
+	PS_INFO("uid=%d build 堆改写 %d 处 (dalvik 空间 %luMB)\n",
 		from_kuid_munged(&init_user_ns, current_uid()),
 		patched, scanned >> 20);
 	return patched;
@@ -1417,7 +1425,6 @@ static struct security_hook_list prop_lsm_hook_open;
 static int lsm_file_open(struct file *file)
 {
 	struct prop_hook *h;
-	static int dbg_n;
 
 #ifdef PROP_SPOOF_TRACE
 	/* 调试检测版：对目标 uid 记录全部 open 路径（限 4000 条防爆日志） */
@@ -1428,7 +1435,7 @@ static int lsm_file_open(struct file *file)
 			pp = dentry_path_raw(file->f_path.dentry, tp, sizeof(tp));
 			if (!IS_ERR(pp)) {
 				trace_n++;
-				pr_info("prop_spoof: trace uid=%d open %s
+				PS_INFO("trace uid=%d open %s
 ",
 					__kuid_val(current_uid()), pp);
 			}
@@ -1441,12 +1448,6 @@ static int lsm_file_open(struct file *file)
 	h = prop_hook_find(file->f_inode);
 	if (!h)
 		return 0;
-	if (dbg_n < 40) {
-		pr_info("prop_spoof: dbg open %s uid=%d swap=%d\n",
-			h->name, from_kuid_munged(&init_user_ns, current_uid()),
-			file->f_op == &prop_lazy_fops);
-		dbg_n++;
-	}
 	if (!uid_match_current())
 		return 0;
 	if (!h->orig_fops)
@@ -1583,7 +1584,7 @@ static int prop_hooks_install(void)
 		prepped++;
 	}
 
-	pr_info("prop_spoof: 属性表就绪 files=%d prepped=%d skipped=%d (fake_dir=%s)\n",
+	PS_INFO("属性表就绪 files=%d prepped=%d skipped=%d (fake_dir=%s)\n",
 		prop_hook_count, prepped, skipped, fake_dir);
 
 	/* ---- /sys CPU 拓扑/频率伪装（v2.4 全套：cpu0-7 + policy） ---- */
@@ -1706,7 +1707,7 @@ static int prop_hooks_install(void)
 				sprep++;
 			}
 		}
-		pr_info("prop_spoof: /sys cpu 伪装就绪 prepped=%d (sys_fake_dir=%s)\n",
+		PS_INFO("/sys cpu 伪装就绪 prepped=%d (sys_fake_dir=%s)\n",
 			sprep, sys_fake_dir);
 
 		/* ---- soc0 通用属性伪造 ----
@@ -1764,7 +1765,7 @@ static int prop_hooks_install(void)
 				filp_close(real0, NULL);
 				s0++;
 			}
-			pr_info("prop_spoof: /sys soc0 伪装就绪 prepped=%d\n", s0);
+			PS_INFO("/sys soc0 伪装就绪 prepped=%d\n", s0);
 
 		/* ---- /proc 里的三个"文件级"探针：version / cmdline / interrupts ----
 		 * 不走 PDE（6.6 上 find_proc_pde("version") 返回 NULL），直接用
@@ -1799,7 +1800,7 @@ static int prop_hooks_install(void)
 				if (IS_ERR(fakep)) {
 					filp_close(realp, NULL);
 					skipped++;
-					pr_info("prop_spoof: 缺假文件 %s/proc/%s\n",
+					PS_INFO("缺假文件 %s/proc/%s\n",
 						sys_fake_dir, proc_files[j]);
 					continue;
 				}
@@ -1813,7 +1814,7 @@ static int prop_hooks_install(void)
 				filp_close(realp, NULL);
 				p0++;
 			}
-			pr_info("prop_spoof: /proc 文件伪装就绪 prepped=%d\n", p0);
+			PS_INFO("/proc 文件伪装就绪 prepped=%d\n", p0);
 
 		/* ---- /sys/class/thermal/thermal_zoneN/type ----
 		 * 真机是 ap_ntc / apu-a0 …，宿主是 aoss / aoss-0，一眼骁龙。
@@ -1849,7 +1850,7 @@ static int prop_hooks_install(void)
 				filp_close(realt, NULL);
 				t0++;
 			}
-			pr_info("prop_spoof: thermal type 伪装就绪 prepped=%d\n", t0);
+			PS_INFO("thermal type 伪装就绪 prepped=%d\n", t0);
 		}
 		}
 		}
@@ -1898,7 +1899,7 @@ static int prop_hooks_install(void)
 				filp_close(real0, NULL);
 				d0++;
 			}
-			pr_info("prop_spoof: device-tree 伪装就绪 prepped=%d\n", d0);
+			PS_INFO("device-tree 伪装就绪 prepped=%d\n", d0);
 		}
 	}
 
@@ -1985,7 +1986,7 @@ static int lsm_install(void)
 		}
 	}
 	lsm_hook_linked = &prop_lsm_hook.list;
-	pr_info("prop_spoof: LSM task_fix_setuid hook 已挂载\n");
+	PS_INFO("LSM task_fix_setuid hook 已挂载\n");
 
 	/* ---- file_open 钩子 ---- */
 	{
@@ -2015,7 +2016,7 @@ static int lsm_install(void)
 				return -ENOMEM;
 			}
 		}
-		pr_info("prop_spoof: LSM file_open hook 已挂载\n");
+		PS_INFO("LSM file_open hook 已挂载\n");
 	}
 	return 0;
 }
@@ -2080,13 +2081,13 @@ static void lsm_remove(void)
 	}
 	synchronize_rcu();
 	lsm_hook_linked = NULL;
-	pr_info("prop_spoof: LSM hook 已摘除\n");
+	PS_INFO("LSM hook 已摘除\n");
 }
 
 #else	/* !PROP_LSM_OK: 6.12+ LSM static_call 架构，链表挂钩不可用 */
 static int lsm_install(void)
 {
-	pr_info("prop_spoof: 6.12+ 无 LSM 链表，per-uid 文件重定向改走 SUSFS open_redirect\n");
+	PS_INFO("6.12+ 无 LSM 链表，per-uid 文件重定向改走 SUSFS open_redirect\n");
 	return 0;
 }
 
@@ -2110,7 +2111,7 @@ static int __init prop_spoof_init(void)
 		remove_proc_entry("prop_spoof", NULL);
 		return -ENOMEM;
 	}
-	pr_info("prop_spoof: builtin 已注册，等待 cfg start\n");
+	PS_INFO("builtin 已注册，等待 cfg start\n");
 	return 0;
 #else
 	parse_target_uids();
