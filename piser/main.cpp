@@ -1,6 +1,8 @@
 // 从「假表」生成 bionic 可解析的 property_info（键 → exported_default_prop）。
 // 用法: piser <spoof_props.txt 或 contexts.txt> <输出文件>
 // 输入行: key=value（假表）或 key context [exact]（contexts 格式）
+#include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <vector>
