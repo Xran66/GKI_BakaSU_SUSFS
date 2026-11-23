@@ -2391,7 +2391,6 @@ ro.fstype.data u:object_r:exported_default_prop:s0 exact
 ro.fuse.bpf.is_running u:object_r:exported_default_prop:s0 exact
 ro.gfx.driver.0 u:object_r:exported_default_prop:s0 exact
 ro.gsid.image_running u:object_r:exported_default_prop:s0 exact
-ro.hardware u:object_r:exported_default_prop:s0 exact
 ro.hardware.bbk u:object_r:exported_default_prop:s0 exact
 ro.hardware.consumerir u:object_r:exported_default_prop:s0 exact
 ro.hardware.gatekeeper u:object_r:exported_default_prop:s0 exact
