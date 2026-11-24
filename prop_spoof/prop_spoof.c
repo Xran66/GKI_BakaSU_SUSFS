@@ -1711,6 +1711,12 @@ static int prop_hooks_install(void)
 			prop_lazy_fops.mmap = prop_lazy_mmap;
 			prop_lazy_fops.read_iter = prop_lazy_read_iter;
 		}
+		/* 真正装上 lazy fops：mmap/read_iter 交给包装版，
+		 * 包装版内部按 is_target() 决定走假文件还是原 fops。
+		 * 这样 fresh 进程（getprop 等）和 zygote 首次映射就能拿到假区，
+		 * 且不走"setuid 后原地改 VMA"的崩溃路径。 */
+		if (h->orig_fops && prop_lazy_fops.mmap)
+			WRITE_ONCE(h->inode->i_fop, &prop_lazy_fops);
 		ihold(h->inode);
 		filp_close(real, NULL);
 		prepped++;
