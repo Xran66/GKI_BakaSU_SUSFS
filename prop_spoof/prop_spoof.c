@@ -916,29 +916,6 @@ static bool gl_str_should_patch(const char *name)
 	       strstr(name, "libGLES_mali");
 }
 
-/* 拷贝一页并打补丁；返回新页（引用已持有）或 NULL */
-static struct page *gl_patch_page(struct page *src)
-{
-	struct page *np = alloc_page(GFP_KERNEL | __GFP_ZERO);
-	char *dst, *s;
-
-	if (!np)
-		return NULL;
-	dst = kmap_local_page(np);
-	s = kmap_local_page(src);
-	memcpy(dst, s, PAGE_SIZE);
-	kunmap_local(s);
-	if (strstr(dst, GL_STR_OLD)) {
-		char *p = dst;
-		while ((p = strstr(p, GL_STR_OLD)) != NULL) {
-			memcpy(p, GL_STR_NEW, GL_STR_LEN);
-			p += GL_STR_LEN;
-		}
-	}
-	kunmap_local(dst);
-	return np;
-}
-
 /* 对一段内核缓冲做字符串搜索；命中返回偏移，未命中返回 -1 */
 static long gl_find_in_kbuf(const char *p, size_t len)
 {
@@ -994,41 +971,6 @@ static int gl_patch_vma(struct vm_area_struct *vma)
 		}
 	}
 	kfree(scan);
-	return patched;
-}static int gl_patch_vma(struct vm_area_struct *vma)
-{
-	unsigned long addr, start = vma->vm_start, end = vma->vm_end;
-	int patched = 0;
-
-	for (addr = start; addr < end; addr += PAGE_SIZE) {
-		pte_t *pte;
-		struct page *src, *np;
-
-		pte = pte_offset_kernel(pmd_offset(pud_offset(
-			p4d_offset(pgd_offset(vma->vm_mm, addr), addr), addr), addr), addr);
-		if (!pte_present(*pte) || pte_special(*pte))
-			continue;
-		src = pte_page(*pte);
-		{
-			char *s = kmap_local_page(src);
-			long hit = gl_find_in_kva(s, PAGE_SIZE);
-			kunmap_local(s);
-			if (hit < 0)
-				continue;
-		}
-		np = gl_patch_page(src);
-		if (!np)
-			continue;
-		{
-			pte_t newpte = mk_pte(np, vma->vm_page_prot);
-			page_remove_rmap(src, vma, false);
-			set_pte_at(vma->vm_mm, addr, pte, newpte);
-			page_add_new_anon_rmap(np, vma, addr, false);
-			lru_cache_add_inactive_or_unevictable(np, vma);
-			flush_tlb_page(vma, addr);
-			patched++;
-		}
-	}
 	return patched;
 }
 
