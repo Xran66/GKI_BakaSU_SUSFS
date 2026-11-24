@@ -44,6 +44,7 @@
 #include <linux/mm.h>
 #include <linux/swap.h>
 #include <linux/rmap.h>
+#include "../../mm/internal.h"
 #include <linux/fs.h>
 #include <linux/dcache.h>
 #include <linux/mm_inline.h>
