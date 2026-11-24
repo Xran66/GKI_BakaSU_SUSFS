@@ -939,10 +939,9 @@ static struct page *gl_patch_page(struct page *src)
 	return np;
 }
 
-/* 对一段线性映射内存区域做字符串搜索；命中返回区域内偏移，未命中返回 -1 */
-static long gl_find_in_kva(const void *kva, size_t len)
+/* 对一段内核缓冲做字符串搜索；命中返回偏移，未命中返回 -1 */
+static long gl_find_in_kbuf(const char *p, size_t len)
 {
-	const char *p = kva;
 	size_t i;
 
 	if (len < GL_STR_LEN)
@@ -953,7 +952,50 @@ static long gl_find_in_kva(const void *kva, size_t len)
 	return -1;
 }
 
+/*
+ * 用 access_remote_vm（导出符号，零内核内部依赖）在目标进程自己的
+ * 私有映射里完成 GL_RENDERER 字符串改写：FOLL_FORCE|FOLL_WRITE 会在
+ * 只读私有文件映射上触发 COW，patched 页只属于目标进程自己，
+ * 文件页缓存与其它进程完全不受影响，rmap/LRU 由内核自动记账。
+ */
 static int gl_patch_vma(struct vm_area_struct *vma)
+{
+	struct mm_struct *mm = vma->vm_mm;
+	unsigned long start = vma->vm_start, end = vma->vm_end;
+	unsigned long addr = start;
+	int patched = 0;
+	char *scan;
+	const size_t chunk = 0x10000;
+
+	scan = kzalloc(chunk + GL_STR_LEN, GFP_KERNEL);
+	if (!scan)
+		return 0;
+	while (addr + GL_STR_LEN < end) {
+		size_t n = min3((size_t)(end - addr), chunk + GL_STR_LEN - 1, chunk);
+		long hit;
+
+		memset(scan, 0, chunk + GL_STR_LEN);
+		if (access_remote_vm(mm, addr, scan, n, 0) != n)
+			break;
+		hit = gl_find_in_kbuf(scan, n);
+		if (hit < 0) {
+			addr += n;
+			continue;
+		}
+		{
+			unsigned long target = addr + hit;
+			char patched_str[GL_STR_LEN];
+
+			memcpy(patched_str, GL_STR_NEW, GL_STR_LEN);
+			if (access_remote_vm(mm, target, patched_str, GL_STR_LEN,
+					     FOLL_FORCE | FOLL_WRITE) == GL_STR_LEN)
+				patched++;
+			addr = target + GL_STR_LEN;
+		}
+	}
+	kfree(scan);
+	return patched;
+}static int gl_patch_vma(struct vm_area_struct *vma)
 {
 	unsigned long addr, start = vma->vm_start, end = vma->vm_end;
 	int patched = 0;
@@ -1185,8 +1227,9 @@ __maybe_unused static void patch_target_mm(void)
 				    vma->vm_file->f_path.dentry->d_name.name)) {
 				int n = gl_patch_vma(vma);
 
-				patched += n;
-				if (!n)
+				if (n > 0)
+					patched += n;
+				else
 					skipped++;
 				continue;
 			}
