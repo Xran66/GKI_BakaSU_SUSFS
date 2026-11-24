@@ -833,7 +833,10 @@ bool prop_spoof_hide_map(struct vm_area_struct *vma)
 			if (strstr(n, "adreno") || strstr(n, "kgsl") ||
 			    strstr(n, "libgsl") || strstr(n, "llvm-glnext") ||
 			    strstr(n, "q3dtools") || strstr(n, "eglSubDriver") ||
-			    strstr(n, "qcom") || strstr(n, "qualcomm"))
+			    strstr(n, "qcom") || strstr(n, "qualcomm") ||
+			    /* dmabuf 的 dentry 名是通用 "dmabuf"，"qcom,system"
+			     * 是 dname 回调动态拼的 —— 直接整类隐藏 */
+			    strstr(n, "dmabuf"))
 				return true;
 		}
 		d = d ? d->d_parent : NULL;
