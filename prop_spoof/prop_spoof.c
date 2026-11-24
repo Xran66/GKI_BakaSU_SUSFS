@@ -43,6 +43,7 @@
 #include <linux/version.h>
 #include <linux/mm.h>
 #include <linux/swap.h>
+#include <linux/rmap.h>
 #include <linux/fs.h>
 #include <linux/dcache.h>
 #include <linux/mm_inline.h>
@@ -1154,7 +1155,7 @@ __maybe_unused static void patch_target_mm(void)
 
 	/* GL 库替换不依赖 prop_vma_enabled：副本与真库字节布局一致，
 	 * 换内容不会踩空缓存指针，属零风险层，vma_off 时也照常生效 */
-	if (!mm || (prop_hook_count == 0 && gl_swap_count == 0))
+	if (!mm)
 		return;
 
 	down_write(&mm->mmap_lock);
