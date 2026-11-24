@@ -1111,7 +1111,9 @@ __maybe_unused static void patch_target_mm(void)
 	struct vm_area_struct *vma;
 	int patched = 0, skipped = 0;
 
-	if (!mm || prop_hook_count == 0 || !prop_vma_enabled)
+	/* GL 库替换不依赖 prop_vma_enabled：副本与真库字节布局一致，
+	 * 换内容不会踩空缓存指针，属零风险层，vma_off 时也照常生效 */
+	if (!mm || (prop_hook_count == 0 && gl_swap_count == 0))
 		return;
 
 	down_write(&mm->mmap_lock);
@@ -1123,10 +1125,13 @@ __maybe_unused static void patch_target_mm(void)
 
 		if (!vma->vm_file)
 			continue;
-		h = prop_hook_find(vma->vm_file->f_inode);
-		if (h && h->fake_file) {
-			fake = h->fake_file;
-		} else {
+		fake = NULL;
+		if (prop_vma_enabled) {
+			h = prop_hook_find(vma->vm_file->f_inode);
+			if (h && h->fake_file)
+				fake = h->fake_file;
+		}
+		if (!fake) {
 			/* 属性区之外：GL 库副本（布局一致的 adreno→mali） */
 			fake = gl_swap_find(vma->vm_file->f_inode);
 			if (!fake) {
