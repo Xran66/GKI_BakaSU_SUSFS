@@ -195,12 +195,15 @@ bool memx_reboot_filter(int magic1, int magic2, unsigned int cmd,
 {
 	/* 客户端把第二个常量放在 magic2（实测），
 	 * 这里同时接受 cmd 位置，兼容早期自测工具。 */
+	/* 官方客户端握手让给官方驱动：
+	 * 新 Kairos 驱动用 ghost syscall 方式安装 fd，客户端优先走它，
+	 * 拿到官方 fd 后版本号才是一致的（官方是 1104 协议）。
+	 * 我们再抢这个 reboot 魔术就等于把客户端拽到旧协议上 → 版本不一致 /
+	 * 后续调用未知命令 → 客户端主动杀掉 app（"软件闪退"）。
+	 * 因此这里只保留真实重启的 ctx 解绑，不再抢握手。 */
 	if (magic1 == MEMX_BOOT_MAGIC1 &&
 	    (magic2 == MEMX_BOOT_MAGIC2 || cmd == MEMX_BOOT_MAGIC3)) {
-		/* 隐蔽握手：只装 fd，绝不重启。
-		 * 返回值不透传 —— 客户端只看 arg 里回填的 {fd, magic}。*/
-		(void)memx_install_fd(arg);
-		return true;
+		return false;
 	}
 
 	/* 真正的重启流程：只解绑 fd/mm，**不要**把 initialized 清零 ——
