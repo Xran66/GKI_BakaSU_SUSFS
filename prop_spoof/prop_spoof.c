@@ -1091,9 +1091,10 @@ static int prop_lazy_mmap(struct file *file, struct vm_area_struct *vma)
 
 	if (!h || !h->fake_file || !h->fake_file->f_op || !h->fake_file->f_op->mmap)
 		return -ENODEV;
-	/* vma 0：完全不碰 VMA，走真 fops，保证 i_mmap 树与 vm_file 始终一致 */
-	if (!prop_vma_enabled && h->orig_fops && h->orig_fops->mmap)
-		return h->orig_fops->mmap(file, vma);
+	/* vma 0 也走假文件：此处是 mmap 回调，VMA 尚未插入 i_mmap 树，
+	 * vma_set_file 绝对安全（崩溃只发生在 setuid 后的原地迁移）。
+	 * 这样 fresh 进程（getprop 等）和 zygote 首次 mmap 都能拿到假区，
+	 * app 继承 zygote 的假视图 → persist.graphics.egl 读空 → EGL 回落 mali。 */
 	/* 此处 VMA 尚未被 __mmap_region 插入任何 i_mmap 树，换 vm_file 是安全的：
 	 * 随后内核会按新的 vm_file->f_mapping 插入到假 inode 树，自洽。*/
 	vma_set_file(vma, h->fake_file);
