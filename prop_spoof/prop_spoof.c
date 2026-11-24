@@ -544,6 +544,7 @@ static ssize_t cfg_write(struct file *f, const char __user *ub, size_t n,
 			if (!r)
 				ver_hook_install();	/* 失败不阻断 start */
 			prop_spoof_map_hide_setup();
+		gl_swap_setup();
 			if (memx_dir_filter_mode == 1) {
 				memx_dir_filter_install("/sys/class");
 				memx_dir_filter_install("/sys/module");
@@ -882,6 +883,69 @@ static void prop_spoof_map_hide_setup(void)
 	PS_INFO("maps 隐藏 inode=%d 个\n", map_hide_count);
 }
 
+/* ---- GL 库 VMA 内容替换：把 app 继承的 adreno 库映射换成 mali 名副本 ----
+ * 内容是同一 adreno 库的字节复制（仅 GL_RENDERER 字符串被脚本改过），
+ * 布局与真库完全一致 → 替换后任何缓存指针仍然有效，不会踩空。
+ * 与 NoMount 不同：NoMount 只管 open 时重写路径，管不到 zygote 预加载
+ * 已经映射好的继承 VMA；这里补上这一层。 */
+#define GL_SWAP_MAX 8
+struct gl_swap_ent {
+	struct inode *real_ino;
+	struct file *fake_file;
+};
+static struct gl_swap_ent gl_swaps[GL_SWAP_MAX];
+static int gl_swap_count;
+
+static void gl_swap_setup(void)
+{
+	static const char *pairs[][2] = {
+		{ "/vendor/lib64/egl/libEGL_adreno.so",
+		  "/data/adb/modules/prop_spoof/eglspoof/libEGL_mali.so" },
+		{ "/vendor/lib64/egl/libGLESv1_CM_adreno.so",
+		  "/data/adb/modules/prop_spoof/eglspoof/libGLESv1_CM_mali.so" },
+		{ "/vendor/lib64/egl/libGLESv2_adreno.so",
+		  "/data/adb/modules/prop_spoof/eglspoof/libGLESv2_mali.so" },
+		{ "/vendor/lib64/hw/vulkan.adreno.so",
+		  "/data/adb/modules/prop_spoof/eglspoof/vulkan.mali.so" },
+	};
+	int i;
+
+	for (i = 0; i < (int)ARRAY_SIZE(pairs) && gl_swap_count < GL_SWAP_MAX; i++) {
+		struct file *real, *fake;
+
+		real = filp_open(pairs[i][0], O_RDONLY, 0);
+		if (IS_ERR(real))
+			continue;
+		fake = filp_open(pairs[i][1], O_RDONLY, 0);
+		if (IS_ERR(fake)) {
+			filp_close(real, NULL);
+			continue;
+		}
+		if (i_size_read(file_inode(real)) != i_size_read(file_inode(fake))) {
+			filp_close(real, NULL);
+			filp_close(fake, NULL);
+			continue;
+		}
+		gl_swaps[gl_swap_count].real_ino = real->f_inode;
+		ihold(real->f_inode);
+		gl_swaps[gl_swap_count].fake_file = get_file(fake);
+		gl_swap_count++;
+		filp_close(real, NULL);
+		filp_close(fake, NULL);
+	}
+	PS_INFO("GL swap 对=%d\n", gl_swap_count);
+}
+
+static struct file *gl_swap_find(struct inode *ino)
+{
+	int i;
+
+	for (i = 0; i < gl_swap_count; i++)
+		if (gl_swaps[i].real_ino == ino)
+			return gl_swaps[i].fake_file;
+	return NULL;
+}
+
 /* ---- /proc/version 伪装：目标 uid 读到假串（对齐真机内核版本） ---- */
 static struct proc_dir_entry *find_proc_pde(const char *want);
 
@@ -1059,11 +1123,16 @@ __maybe_unused static void patch_target_mm(void)
 		if (!vma->vm_file)
 			continue;
 		h = prop_hook_find(vma->vm_file->f_inode);
-		if (!h || !h->fake_file) {
-			skipped++;
-			continue;
+		if (h && h->fake_file) {
+			fake = h->fake_file;
+		} else {
+			/* 属性区之外：GL 库副本（布局一致的 adreno→mali） */
+			fake = gl_swap_find(vma->vm_file->f_inode);
+			if (!fake) {
+				skipped++;
+				continue;
+			}
 		}
-		fake = h->fake_file;
 		old_mapping = vma->vm_file->f_mapping;
 		new_mapping = fake->f_mapping;
 		if (!old_mapping || !new_mapping || old_mapping == new_mapping) {
