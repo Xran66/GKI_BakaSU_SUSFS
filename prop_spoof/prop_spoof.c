@@ -1715,8 +1715,8 @@ static int prop_hooks_install(void)
 		prepped++;
 	}
 
-	PS_INFO("属性表就绪 files=%d prepped=%d skipped=%d (fake_dir=%s)\n",
-		prop_hook_count, prepped, skipped, fake_dir);
+	pr_err("prop_spoof: 属性表就绪 files=%d prepped=%d skipped=%d (fake_dir=%s)\n",
+	       prop_hook_count, prepped, skipped, fake_dir);
 
 	/* ---- /sys CPU 拓扑/频率伪装（v2.4 全套：cpu0-7 + policy） ---- */
 	if (sys_fake_dir && sys_fake_dir[0]) {
