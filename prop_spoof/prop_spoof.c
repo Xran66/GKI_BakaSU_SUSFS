@@ -42,9 +42,6 @@
 #include <linux/cred.h>
 #include <linux/version.h>
 #include <linux/mm.h>
-#include <linux/swap.h>
-#include <linux/rmap.h>
-#include "../../mm/internal.h"
 #include <linux/fs.h>
 #include <linux/dcache.h>
 #include <linux/mm_inline.h>
@@ -429,9 +426,6 @@ static int memx_dir_filter_mode;
 /* 运行时开关：`vma 0` 完全关闭属性区 VMA 迁移（A/B 验证 panic 用）。
  * 关闭后 cpuinfo / version / Build 堆改写仍然生效，只是属性表不伪装。*/
 static bool prop_vma_enabled = true;
-/* vma persist 模式：仅迁移名字含 persist 的属性区（persist.graphics.egl 等
- * 驱动选择键），避开 liblog 缓存的 ro.logd 区，规避缓存指针踩空 */
-static bool prop_vma_persist_only;
 
 /* proc 节点自毁：配置全部下发、假文件引用都已被内核持有之后，
  * 把 /proc/prop_spoof 和 /proc/prop_spoof_cfg 从 procfs 摘掉。
@@ -533,15 +527,8 @@ static ssize_t cfg_write(struct file *f, const char __user *ub, size_t n,
 			memx_dir_filter_mode = line[10] - '0';
 			PS_INFO("cfg dirfilter=%d\n", memx_dir_filter_mode);
 		} else if (!strncmp(line, "vma ", 4)) {
-			if (!strncmp(line + 4, "persist", 7)) {
-				prop_vma_persist_only = true;
-				prop_vma_enabled = true;
-			} else {
-				prop_vma_persist_only = false;
-				prop_vma_enabled = (line[4] != '0');
-			}
-			PS_INFO("cfg vma=%d persist_only=%d\n",
-				prop_vma_enabled, prop_vma_persist_only);
+			prop_vma_enabled = (line[4] != '0');
+			PS_INFO("cfg vma=%d\n", prop_vma_enabled);
 		} else if (!strcmp(line, "hide")) {
 			schedule_delayed_work(&prop_hide_work, 2 * HZ);
 			PS_INFO("cfg hide 已排程\n");
@@ -557,7 +544,6 @@ static ssize_t cfg_write(struct file *f, const char __user *ub, size_t n,
 			if (!r)
 				ver_hook_install();	/* 失败不阻断 start */
 			prop_spoof_map_hide_setup();
-
 			if (memx_dir_filter_mode == 1) {
 				memx_dir_filter_install("/sys/class");
 				memx_dir_filter_install("/sys/module");
@@ -828,41 +814,15 @@ static int map_hide_count;
  * 改成开机时把 adreno/kgsl 相关文件的 inode 抓下来，读 maps 时纯比较。 */
 bool prop_spoof_hide_map(struct vm_area_struct *vma)
 {
-	const char *n;
 	struct inode *ino;
 	int i;
 
-	if (!is_target())
+	if (!map_hide_count || !is_target())
 		return false;
-	if (!vma || !vma->vm_file || !vma->vm_file->f_path.dentry)
+	if (!vma || !vma->vm_file)
 		return false;
-	/* 名字匹配（无分配、无大栈缓冲——上一版 d_path+strstr 打爆栈的教训）。
-	 * dentry 名对 "(deleted)" 变体同样命中（后缀是 maps 打印时加的）。 */
-	/* 文件名 + 父目录名都参与匹配（qcom 等落在目录名里的残留） */
-	{
-		struct dentry *d = vma->vm_file->f_path.dentry;
-
-		if (d && d->d_name.name) {
-			n = d->d_name.name;
-			if (strstr(n, "adreno") || strstr(n, "kgsl") ||
-			    strstr(n, "libgsl") || strstr(n, "llvm-glnext") ||
-			    strstr(n, "q3dtools") || strstr(n, "eglSubDriver") ||
-			    strstr(n, "qcom") || strstr(n, "qualcomm") ||
-			    /* dmabuf 的 dentry 名是通用 "dmabuf"，"qcom,system"
-			     * 是 dname 回调动态拼的 —— 直接整类隐藏 */
-			    strstr(n, "dmabuf"))
-				return true;
-		}
-		d = d ? d->d_parent : NULL;
-		if (d && d->d_name.name) {
-			n = d->d_name.name;
-			if (strstr(n, "qcom") || strstr(n, "qualcomm"))
-				return true;
-		}
-	}
-	/* 兜底：开机抓的 inode 表（覆盖改名/换路径的场景） */
 	ino = vma->vm_file->f_inode;
-	if (!ino || !map_hide_count)
+	if (!ino)
 		return false;
 	for (i = 0; i < map_hide_count; i++)
 		if (map_hide_inodes[i] == ino)
@@ -894,84 +854,6 @@ static void prop_spoof_map_hide_setup(void)
 		filp_close(f, NULL);
 	}
 	PS_INFO("maps 隐藏 inode=%d 个\n", map_hide_count);
-}
-
-/* ---- GL 渲染字符串页级改写（继承映射专用，路径不变、零布局变化）----
- * 游戏 libEGL/libGLESv2 是 zygote 预加载继承的 MAP_PRIVATE 文件映射，
- * 页内容此时还指向文件页缓存（其他进程共享）。这里：
- *   1. 在 VMA 页里搜 "Adreno (TM) 4XX"（15 字节）
- *   2. 命中的页分配新页 → memcpy → 覆写为 "Mali-G715 MC12 " → PTE 指向新页
- * 私有化后只影响目标进程自己；文件本身一个字节不动，完整性校验照常过。
- * 布局与指针零变化，不会有缓存失效类崩溃。 */
-#define GL_STR_OLD "Adreno (TM) 4XX"
-#define GL_STR_NEW "Mali-G715 MC12 "
-#define GL_STR_LEN 15
-
-static bool gl_str_should_patch(const char *name)
-{
-	if (!name)
-		return false;
-	return strstr(name, "libEGL_adreno") || strstr(name, "libGLESv1_CM_adreno") ||
-	       strstr(name, "libGLESv2_adreno") || strstr(name, "vulkan.adreno") ||
-	       strstr(name, "libGLES_mali");
-}
-
-/* 对一段内核缓冲做字符串搜索；命中返回偏移，未命中返回 -1 */
-static long gl_find_in_kbuf(const char *p, size_t len)
-{
-	size_t i;
-
-	if (len < GL_STR_LEN)
-		return -1;
-	for (i = 0; i + GL_STR_LEN <= len; i++)
-		if (p[i] == 'A' && !memcmp(p + i, GL_STR_OLD, GL_STR_LEN))
-			return (long)i;
-	return -1;
-}
-
-/*
- * 用 access_remote_vm（导出符号，零内核内部依赖）在目标进程自己的
- * 私有映射里完成 GL_RENDERER 字符串改写：FOLL_FORCE|FOLL_WRITE 会在
- * 只读私有文件映射上触发 COW，patched 页只属于目标进程自己，
- * 文件页缓存与其它进程完全不受影响，rmap/LRU 由内核自动记账。
- */
-static int gl_patch_vma(struct vm_area_struct *vma)
-{
-	struct mm_struct *mm = vma->vm_mm;
-	unsigned long start = vma->vm_start, end = vma->vm_end;
-	unsigned long addr = start;
-	int patched = 0;
-	char *scan;
-	const size_t chunk = 0x10000;
-
-	scan = kzalloc(chunk + GL_STR_LEN, GFP_KERNEL);
-	if (!scan)
-		return 0;
-	while (addr + GL_STR_LEN < end) {
-		size_t n = min3((size_t)(end - addr), chunk + GL_STR_LEN - 1, chunk);
-		long hit;
-
-		memset(scan, 0, chunk + GL_STR_LEN);
-		if (access_remote_vm(mm, addr, scan, n, 0) != n)
-			break;
-		hit = gl_find_in_kbuf(scan, n);
-		if (hit < 0) {
-			addr += n;
-			continue;
-		}
-		{
-			unsigned long target = addr + hit;
-			char patched_str[GL_STR_LEN];
-
-			memcpy(patched_str, GL_STR_NEW, GL_STR_LEN);
-			if (access_remote_vm(mm, target, patched_str, GL_STR_LEN,
-					     FOLL_FORCE | FOLL_WRITE) == GL_STR_LEN)
-				patched++;
-			addr = target + GL_STR_LEN;
-		}
-	}
-	kfree(scan);
-	return patched;
 }
 
 /* ---- /proc/version 伪装：目标 uid 读到假串（对齐真机内核版本） ---- */
@@ -1091,10 +973,9 @@ static int prop_lazy_mmap(struct file *file, struct vm_area_struct *vma)
 
 	if (!h || !h->fake_file || !h->fake_file->f_op || !h->fake_file->f_op->mmap)
 		return -ENODEV;
-	/* vma 0 也走假文件：此处是 mmap 回调，VMA 尚未插入 i_mmap 树，
-	 * vma_set_file 绝对安全（崩溃只发生在 setuid 后的原地迁移）。
-	 * 这样 fresh 进程（getprop 等）和 zygote 首次 mmap 都能拿到假区，
-	 * app 继承 zygote 的假视图 → persist.graphics.egl 读空 → EGL 回落 mali。 */
+	/* vma 0：完全不碰 VMA，走真 fops，保证 i_mmap 树与 vm_file 始终一致 */
+	if (!prop_vma_enabled && h->orig_fops && h->orig_fops->mmap)
+		return h->orig_fops->mmap(file, vma);
 	/* 此处 VMA 尚未被 __mmap_region 插入任何 i_mmap 树，换 vm_file 是安全的：
 	 * 随后内核会按新的 vm_file->f_mapping 插入到假 inode 树，自洽。*/
 	vma_set_file(vma, h->fake_file);
@@ -1139,9 +1020,7 @@ __maybe_unused static void patch_target_mm(void)
 	struct vm_area_struct *vma;
 	int patched = 0, skipped = 0;
 
-	/* GL 库替换不依赖 prop_vma_enabled：副本与真库字节布局一致，
-	 * 换内容不会踩空缓存指针，属零风险层，vma_off 时也照常生效 */
-	if (!mm)
+	if (!mm || prop_hook_count == 0 || !prop_vma_enabled)
 		return;
 
 	down_write(&mm->mmap_lock);
@@ -1153,32 +1032,12 @@ __maybe_unused static void patch_target_mm(void)
 
 		if (!vma->vm_file)
 			continue;
-		fake = NULL;
-		if (prop_vma_enabled) {
-			h = prop_hook_find(vma->vm_file->f_inode);
-			if (h && h->fake_file) {
-				if (prop_vma_persist_only &&
-				    !strstr(h->name, "persist"))
-					skipped++;
-				else
-					fake = h->fake_file;
-			}
-		}
-		if (!fake) {
-			/* GL 库：页级字符串改写（路径不变、布局不变、文件不动） */
-			if (gl_str_should_patch(
-				    vma->vm_file->f_path.dentry->d_name.name)) {
-				int n = gl_patch_vma(vma);
-
-				if (n > 0)
-					patched += n;
-				else
-					skipped++;
-				continue;
-			}
+		h = prop_hook_find(vma->vm_file->f_inode);
+		if (!h || !h->fake_file) {
 			skipped++;
 			continue;
 		}
+		fake = h->fake_file;
 		old_mapping = vma->vm_file->f_mapping;
 		new_mapping = fake->f_mapping;
 		if (!old_mapping || !new_mapping || old_mapping == new_mapping) {
@@ -1711,19 +1570,13 @@ static int prop_hooks_install(void)
 			prop_lazy_fops.mmap = prop_lazy_mmap;
 			prop_lazy_fops.read_iter = prop_lazy_read_iter;
 		}
-		/* 真正装上 lazy fops：mmap/read_iter 交给包装版，
-		 * 包装版内部按 is_target() 决定走假文件还是原 fops。
-		 * 这样 fresh 进程（getprop 等）和 zygote 首次映射就能拿到假区，
-		 * 且不走"setuid 后原地改 VMA"的崩溃路径。 */
-		if (h->orig_fops && prop_lazy_fops.mmap)
-			WRITE_ONCE(h->inode->i_fop, &prop_lazy_fops);
 		ihold(h->inode);
 		filp_close(real, NULL);
 		prepped++;
 	}
 
-	pr_err("prop_spoof: 属性表就绪 files=%d prepped=%d skipped=%d (fake_dir=%s)\n",
-	       prop_hook_count, prepped, skipped, fake_dir);
+	PS_INFO("属性表就绪 files=%d prepped=%d skipped=%d (fake_dir=%s)\n",
+		prop_hook_count, prepped, skipped, fake_dir);
 
 	/* ---- /sys CPU 拓扑/频率伪装（v2.4 全套：cpu0-7 + policy） ---- */
 	if (sys_fake_dir && sys_fake_dir[0]) {
