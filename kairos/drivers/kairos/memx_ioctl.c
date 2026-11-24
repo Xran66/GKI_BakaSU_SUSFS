@@ -157,6 +157,68 @@ struct memx_batch_entry {
 #define MEMX_BATCH_OUT_OFF	0x1008
 #define MEMX_BATCH_OUT_MAX	0x8000
 
+/* KOP_GET_VMA_BATCH：单次调用返回目标进程全部 VMA（对齐官方 get_vma_batch） */
+struct memx_vma_ent {
+	__u64 start;
+	__u64 end;
+	__u32 flags;
+	__u32 _pad;
+};
+static long memx_vma_batch(void __user *uarg)
+{
+	struct {
+		__u32 pid;
+		__u32 pad;
+		__u64 buf;
+		__u32 max;
+		__u32 written;
+		__u64 total;
+	} r;
+	struct mm_struct *mm;
+	struct vma_iterator vmi;
+	struct vm_area_struct *vma;
+	unsigned long count = 0;
+	int copied = 0;
+
+	if (copy_from_user(&r, uarg, sizeof(r)))
+		return -EFAULT;
+	if (!r.buf || !r.max)
+		return -EINVAL;
+
+	mm = memx_task_mm_attach(r.pid);
+	if (!mm)
+		return -ESRCH;
+
+	down_read(&mm->mmap_lock);
+	vma_iter_init(&vmi, mm, 0);
+	for_each_vma(vmi, vma) {
+		if (copied < r.max) {
+			struct memx_vma_ent e;
+
+			e.start = vma->vm_start;
+			e.end = vma->vm_end;
+			e.flags = (u32)(vma->vm_flags & 0xff);
+			e._pad = 0;
+			if (copy_to_user((void __user *)(r.buf + copied * sizeof(e)),
+					 &e, sizeof(e))) {
+				up_read(&mm->mmap_lock);
+				mmput(mm);
+				return -EFAULT;
+			}
+			copied++;
+		}
+		count++;
+	}
+	up_read(&mm->mmap_lock);
+	mmput(mm);
+
+	r.written = copied;
+	r.total = count;
+	if (copy_to_user(uarg, &r, sizeof(r)))
+		return -EFAULT;
+	return 0;
+}
+
 static long memx_do_batch(void __user *uarg)
 {
 	struct {
@@ -337,6 +399,9 @@ long memx_dispatch(struct file *file, u32 magic, u32 op, void __user *uarg)
 	case KOP_MEM_A:
 	case KOP_MEM_A2:
 		return memx_do_batch(uarg);
+
+	case KOP_GET_VMA_BATCH:
+		return memx_vma_batch(uarg);
 
 	case KOP_EXIT:
 		/*
