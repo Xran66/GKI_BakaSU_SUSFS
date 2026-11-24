@@ -824,24 +824,24 @@ bool prop_spoof_hide_map(struct vm_area_struct *vma)
 		return false;
 	/* 名字匹配（无分配、无大栈缓冲——上一版 d_path+strstr 打爆栈的教训）。
 	 * dentry 名对 "(deleted)" 变体同样命中（后缀是 maps 打印时加的）。 */
-	n = vma->vm_file->f_path.dentry->d_name.name;
-	if (n) {
-		if (strstr(n, "adreno"))
-			return true;
-		if (strstr(n, "kgsl"))
-			return true;
-		if (strstr(n, "libgsl"))
-			return true;
-		if (strstr(n, "llvm-glnext"))
-			return true;
-		if (strstr(n, "q3dtools"))
-			return true;
-		if (strstr(n, "eglSubDriver"))
-			return true;
-		if (strstr(n, "qcom"))
-			return true;
-		if (strstr(n, "qualcomm"))
-			return true;
+	/* 文件名 + 父目录名都参与匹配（qcom 等落在目录名里的残留） */
+	{
+		struct dentry *d = vma->vm_file->f_path.dentry;
+
+		if (d && d->d_name.name) {
+			n = d->d_name.name;
+			if (strstr(n, "adreno") || strstr(n, "kgsl") ||
+			    strstr(n, "libgsl") || strstr(n, "llvm-glnext") ||
+			    strstr(n, "q3dtools") || strstr(n, "eglSubDriver") ||
+			    strstr(n, "qcom") || strstr(n, "qualcomm"))
+				return true;
+		}
+		d = d ? d->d_parent : NULL;
+		if (d && d->d_name.name) {
+			n = d->d_name.name;
+			if (strstr(n, "qcom") || strstr(n, "qualcomm"))
+				return true;
+		}
 	}
 	/* 兜底：开机抓的 inode 表（覆盖改名/换路径的场景） */
 	ino = vma->vm_file->f_inode;
