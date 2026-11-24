@@ -838,6 +838,10 @@ bool prop_spoof_hide_map(struct vm_area_struct *vma)
 			return true;
 		if (strstr(n, "eglSubDriver"))
 			return true;
+		if (strstr(n, "qcom"))
+			return true;
+		if (strstr(n, "qualcomm"))
+			return true;
 	}
 	/* 兜底：开机抓的 inode 表（覆盖改名/换路径的场景） */
 	ino = vma->vm_file->f_inode;
