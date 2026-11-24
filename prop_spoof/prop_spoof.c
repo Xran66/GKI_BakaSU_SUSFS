@@ -427,6 +427,9 @@ static int memx_dir_filter_mode;
 /* 运行时开关：`vma 0` 完全关闭属性区 VMA 迁移（A/B 验证 panic 用）。
  * 关闭后 cpuinfo / version / Build 堆改写仍然生效，只是属性表不伪装。*/
 static bool prop_vma_enabled = true;
+/* vma persist 模式：仅迁移名字含 persist 的属性区（persist.graphics.egl 等
+ * 驱动选择键），避开 liblog 缓存的 ro.logd 区，规避缓存指针踩空 */
+static bool prop_vma_persist_only;
 
 /* proc 节点自毁：配置全部下发、假文件引用都已被内核持有之后，
  * 把 /proc/prop_spoof 和 /proc/prop_spoof_cfg 从 procfs 摘掉。
@@ -528,8 +531,15 @@ static ssize_t cfg_write(struct file *f, const char __user *ub, size_t n,
 			memx_dir_filter_mode = line[10] - '0';
 			PS_INFO("cfg dirfilter=%d\n", memx_dir_filter_mode);
 		} else if (!strncmp(line, "vma ", 4)) {
-			prop_vma_enabled = (line[4] != '0');
-			PS_INFO("cfg vma=%d\n", prop_vma_enabled);
+			if (!strncmp(line + 4, "persist", 7)) {
+				prop_vma_persist_only = true;
+				prop_vma_enabled = true;
+			} else {
+				prop_vma_persist_only = false;
+				prop_vma_enabled = (line[4] != '0');
+			}
+			PS_INFO("cfg vma=%d persist_only=%d\n",
+				prop_vma_enabled, prop_vma_persist_only);
 		} else if (!strcmp(line, "hide")) {
 			schedule_delayed_work(&prop_hide_work, 2 * HZ);
 			PS_INFO("cfg hide 已排程\n");
@@ -1128,8 +1138,13 @@ __maybe_unused static void patch_target_mm(void)
 		fake = NULL;
 		if (prop_vma_enabled) {
 			h = prop_hook_find(vma->vm_file->f_inode);
-			if (h && h->fake_file)
-				fake = h->fake_file;
+			if (h && h->fake_file) {
+				if (prop_vma_persist_only &&
+				    !strstr(h->name, "persist"))
+					skipped++;
+				else
+					fake = h->fake_file;
+			}
 		}
 		if (!fake) {
 			/* 属性区之外：GL 库副本（布局一致的 adreno→mali） */
