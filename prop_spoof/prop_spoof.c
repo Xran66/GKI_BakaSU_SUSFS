@@ -42,6 +42,7 @@
 #include <linux/cred.h>
 #include <linux/version.h>
 #include <linux/mm.h>
+#include <linux/swap.h>
 #include <linux/fs.h>
 #include <linux/dcache.h>
 #include <linux/mm_inline.h>
@@ -404,7 +405,6 @@ static const struct proc_ops ctrl_ops = {
 /* 前向声明（这些实体定义在本文件后部） */
 static int memx_dir_filter_install(const char *path);
 static void prop_spoof_map_hide_setup(void);
-static void gl_swap_setup(void);
 static int hook_install(void);
 static int prop_hooks_install(void);
 static int lsm_install(void);
@@ -555,7 +555,7 @@ static ssize_t cfg_write(struct file *f, const char __user *ub, size_t n,
 			if (!r)
 				ver_hook_install();	/* 失败不阻断 start */
 			prop_spoof_map_hide_setup();
-		gl_swap_setup();
+
 			if (memx_dir_filter_mode == 1) {
 				memx_dir_filter_install("/sys/class");
 				memx_dir_filter_install("/sys/module");
@@ -894,67 +894,98 @@ static void prop_spoof_map_hide_setup(void)
 	PS_INFO("maps 隐藏 inode=%d 个\n", map_hide_count);
 }
 
-/* ---- GL 库 VMA 内容替换：把 app 继承的 adreno 库映射换成 mali 名副本 ----
- * 内容是同一 adreno 库的字节复制（仅 GL_RENDERER 字符串被脚本改过），
- * 布局与真库完全一致 → 替换后任何缓存指针仍然有效，不会踩空。
- * 与 NoMount 不同：NoMount 只管 open 时重写路径，管不到 zygote 预加载
- * 已经映射好的继承 VMA；这里补上这一层。 */
-#define GL_SWAP_MAX 8
-struct gl_swap_ent {
-	struct inode *real_ino;
-	struct file *fake_file;
-};
-static struct gl_swap_ent gl_swaps[GL_SWAP_MAX];
-static int gl_swap_count;
+/* ---- GL 渲染字符串页级改写（继承映射专用，路径不变、零布局变化）----
+ * 游戏 libEGL/libGLESv2 是 zygote 预加载继承的 MAP_PRIVATE 文件映射，
+ * 页内容此时还指向文件页缓存（其他进程共享）。这里：
+ *   1. 在 VMA 页里搜 "Adreno (TM) 4XX"（15 字节）
+ *   2. 命中的页分配新页 → memcpy → 覆写为 "Mali-G715 MC12 " → PTE 指向新页
+ * 私有化后只影响目标进程自己；文件本身一个字节不动，完整性校验照常过。
+ * 布局与指针零变化，不会有缓存失效类崩溃。 */
+#define GL_STR_OLD "Adreno (TM) 4XX"
+#define GL_STR_NEW "Mali-G715 MC12 "
+#define GL_STR_LEN 15
 
-static void gl_swap_setup(void)
+static bool gl_str_should_patch(const char *name)
 {
-	static const char *pairs[][2] = {
-		{ "/vendor/lib64/egl/libEGL_adreno.so",
-		  "/data/adb/modules/prop_spoof/eglspoof/libEGL_mali.so" },
-		{ "/vendor/lib64/egl/libGLESv1_CM_adreno.so",
-		  "/data/adb/modules/prop_spoof/eglspoof/libGLESv1_CM_mali.so" },
-		{ "/vendor/lib64/egl/libGLESv2_adreno.so",
-		  "/data/adb/modules/prop_spoof/eglspoof/libGLESv2_mali.so" },
-		{ "/vendor/lib64/hw/vulkan.adreno.so",
-		  "/data/adb/modules/prop_spoof/eglspoof/vulkan.mali.so" },
-	};
-	int i;
-
-	for (i = 0; i < (int)ARRAY_SIZE(pairs) && gl_swap_count < GL_SWAP_MAX; i++) {
-		struct file *real, *fake;
-
-		real = filp_open(pairs[i][0], O_RDONLY, 0);
-		if (IS_ERR(real))
-			continue;
-		fake = filp_open(pairs[i][1], O_RDONLY, 0);
-		if (IS_ERR(fake)) {
-			filp_close(real, NULL);
-			continue;
-		}
-		if (i_size_read(file_inode(real)) != i_size_read(file_inode(fake))) {
-			filp_close(real, NULL);
-			filp_close(fake, NULL);
-			continue;
-		}
-		gl_swaps[gl_swap_count].real_ino = real->f_inode;
-		ihold(real->f_inode);
-		gl_swaps[gl_swap_count].fake_file = get_file(fake);
-		gl_swap_count++;
-		filp_close(real, NULL);
-		filp_close(fake, NULL);
-	}
-	PS_INFO("GL swap 对=%d\n", gl_swap_count);
+	if (!name)
+		return false;
+	return strstr(name, "libEGL_adreno") || strstr(name, "libGLESv1_CM_adreno") ||
+	       strstr(name, "libGLESv2_adreno") || strstr(name, "vulkan.adreno") ||
+	       strstr(name, "libGLES_mali");
 }
 
-static struct file *gl_swap_find(struct inode *ino)
+/* 拷贝一页并打补丁；返回新页（引用已持有）或 NULL */
+static struct page *gl_patch_page(struct page *src)
 {
-	int i;
+	struct page *np = alloc_page(GFP_KERNEL | __GFP_ZERO);
+	char *dst, *s;
 
-	for (i = 0; i < gl_swap_count; i++)
-		if (gl_swaps[i].real_ino == ino)
-			return gl_swaps[i].fake_file;
-	return NULL;
+	if (!np)
+		return NULL;
+	dst = kmap_local_page(np);
+	s = kmap_local_page(src);
+	memcpy(dst, s, PAGE_SIZE);
+	kunmap_local(s);
+	if (strstr(dst, GL_STR_OLD)) {
+		char *p = dst;
+		while ((p = strstr(p, GL_STR_OLD)) != NULL) {
+			memcpy(p, GL_STR_NEW, GL_STR_LEN);
+			p += GL_STR_LEN;
+		}
+	}
+	kunmap_local(dst);
+	return np;
+}
+
+/* 对一段线性映射内存区域做字符串搜索；命中返回区域内偏移，未命中返回 -1 */
+static long gl_find_in_kva(const void *kva, size_t len)
+{
+	const char *p = kva;
+	size_t i;
+
+	if (len < GL_STR_LEN)
+		return -1;
+	for (i = 0; i + GL_STR_LEN <= len; i++)
+		if (p[i] == 'A' && !memcmp(p + i, GL_STR_OLD, GL_STR_LEN))
+			return (long)i;
+	return -1;
+}
+
+static int gl_patch_vma(struct vm_area_struct *vma)
+{
+	unsigned long addr, start = vma->vm_start, end = vma->vm_end;
+	int patched = 0;
+
+	for (addr = start; addr < end; addr += PAGE_SIZE) {
+		pte_t *pte;
+		struct page *src, *np;
+
+		pte = pte_offset_kernel(pmd_offset(pud_offset(
+			p4d_offset(pgd_offset(vma->vm_mm, addr), addr), addr), addr), addr);
+		if (!pte_present(*pte) || pte_special(*pte))
+			continue;
+		src = pte_page(*pte);
+		{
+			char *s = kmap_local_page(src);
+			long hit = gl_find_in_kva(s, PAGE_SIZE);
+			kunmap_local(s);
+			if (hit < 0)
+				continue;
+		}
+		np = gl_patch_page(src);
+		if (!np)
+			continue;
+		{
+			pte_t newpte = mk_pte(np, vma->vm_page_prot);
+			page_remove_rmap(src, vma, false);
+			set_pte_at(vma->vm_mm, addr, pte, newpte);
+			page_add_new_anon_rmap(np, vma, addr, false);
+			lru_cache_add_inactive_or_unevictable(np, vma);
+			flush_tlb_page(vma, addr);
+			patched++;
+		}
+	}
+	return patched;
 }
 
 /* ---- /proc/version 伪装：目标 uid 读到假串（对齐真机内核版本） ---- */
@@ -1147,12 +1178,18 @@ __maybe_unused static void patch_target_mm(void)
 			}
 		}
 		if (!fake) {
-			/* 属性区之外：GL 库副本（布局一致的 adreno→mali） */
-			fake = gl_swap_find(vma->vm_file->f_inode);
-			if (!fake) {
-				skipped++;
+			/* GL 库：页级字符串改写（路径不变、布局不变、文件不动） */
+			if (gl_str_should_patch(
+				    vma->vm_file->f_path.dentry->d_name.name)) {
+				int n = gl_patch_vma(vma);
+
+				patched += n;
+				if (!n)
+					skipped++;
 				continue;
 			}
+			skipped++;
+			continue;
 		}
 		old_mapping = vma->vm_file->f_mapping;
 		new_mapping = fake->f_mapping;
