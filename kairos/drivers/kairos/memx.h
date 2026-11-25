@@ -54,7 +54,7 @@
 #define MEMX_BOOT_MAGIC2	0x51239123
 #define MEMX_BOOT_MAGIC3	MEMX_BOOT_MAGIC2
 #define MEMX_KEY_LEN		64
-#define MEMX_MAGIC_REPLY	1102
+#define MEMX_MAGIC_REPLY	1104	/* 驱动版本 1.1.4（旧 1102=1.1.2）；客户端按此值校验版本 */
 
 /* 用户态 ABI 与 .ko 版保持一致，这样现有客户端二进制不用改 */
 struct memx_req {
