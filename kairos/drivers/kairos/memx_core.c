@@ -32,6 +32,7 @@
 #include <linux/rcupdate.h>
 #include <linux/mutex.h>
 #include <linux/module.h>
+#include <linux/kobject.h>
 #include <linux/workqueue.h>
 #include <linux/umh.h>
 #include <linux/namei.h>
@@ -347,24 +348,27 @@ static int memx_exec_cb(struct kprobe *p, struct pt_regs *regs)
 /* ================================================================== */
 /* init / exit                                                         */
 /* ================================================================== */
+/* 官方加载器（TIME_Cloud_Loader）会检查 /sys/module/KAIROS 是否存在，
+ * 不存在就报「Kairos驱动未加载」。我们内建版自身是 memx_core，所以补一个
+ * 同名 kobject 占位，让检查通过；这也和官方驱动的模块名保持一致。*/
+static struct kobject *memx_kairos_kobj;
+
 static int __init memx_init(void)
 {
 	init_rwsem(&memx_lifecycle_sem);
-
-	/* 注意：这里**不打任何 log**。.ko 版的 "[MEMX] K:0" 是 dmesg 里
-	 * 最直接的暴露，built-in 后连初始化痕迹都不该留。 */
 	WRITE_ONCE(memx_initialized, 1);
 
-	INIT_WORK(&memx_boot_work_dummy, memx_boot_work_fn);
-	INIT_DELAYED_WORK(&memx_boot_work, memx_boot_work_fn);
-	memx_exec_probe.symbol_name = "do_execveat_common";
-	memx_exec_probe.pre_handler = memx_exec_cb;
-	if (register_kprobe(&memx_exec_probe)) {
-		pr_info("memx: kprobe 注册失败，退回 25s 定时尝试\n");
-		schedule_delayed_work(&memx_boot_work, 25 * HZ);
+	/* /sys/module/KAIROS 占位 */
+	memx_kairos_kobj = kobject_create_and_add("KAIROS", module_kset);
+
+	/* 开机自启已废弃（boot_script 默认空）：payload 为空时不注册 kprobe */
+	if (memx_boot_payload && memx_boot_payload[0]) {
+		INIT_WORK(&memx_boot_work_dummy, memx_boot_work_fn);
+		INIT_DELAYED_WORK(&memx_boot_work, memx_boot_work_fn);
+		memx_exec_probe.symbol_name = "do_execveat_common";
+		memx_exec_probe.pre_handler = memx_exec_cb;
+		register_kprobe(&memx_exec_probe);
 	}
-	pr_info("memx: init ok, boot work armed (script=%s)\n",
-		memx_boot_payload ? memx_boot_payload : "(null)");
 	return 0;
 }
 
