@@ -364,6 +364,11 @@ long memx_dispatch(struct file *file, u32 magic, u32 op, void __user *uarg)
 	u32 pid, v;
 	long ret;
 
+	/* 诊断：把客户端/加载器发来的每条命令打到 dmesg（临时，定位对齐用） */
+	pr_err("memx: op=0x%x uid=%d magic=%u ctx_magic=%u authed=%d\n",
+	       op, __kuid_val(current_uid()), magic,
+	       ctx ? ctx->magic : 0, ctx ? (int)ctx->authed : -1);
+
 	if (!ctx || !ctx->magic || ctx->magic != magic)
 		return -ENOTTY;
 	if (op != KOP_AUTH && !ctx->authed)
