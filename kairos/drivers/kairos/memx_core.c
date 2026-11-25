@@ -232,7 +232,11 @@ bool memx_reboot_filter(int magic1, int magic2, unsigned int cmd,
 /* 时序等价 post-fs-data：/data 没挂好之前文件不存在，一直重试；         */
 /* 挂好之后 ≤3s 执行，早于任何 app 起来。                              */
 /* ================================================================== */
-static char *memx_boot_payload = "/data/adb/nm_boot.sh";
+/* 开机自启已废弃：kprobe(do_execveat_common) 里 spawn 的 umh 进程在早期
+ * mount ns 里，/data 常看不见，脚本十次有九次跑不起来（boot.log 里
+ * "缺 /proc/prop_spoof_cfg" 就是它）。现在统一由管理器「部署模块/执行脚本」
+ * 手动触发，这里默认留空 = 不自动跑。*/
+static char *memx_boot_payload = "";
 module_param_named(boot_script, memx_boot_payload, charp, 0444);
 static int memx_boot_tries = 4;	/* 错峰 spawn 次数 */
 module_param_named(boot_retries, memx_boot_tries, int, 0444);
