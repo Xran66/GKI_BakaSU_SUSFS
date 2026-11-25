@@ -359,7 +359,7 @@ static int __init memx_init(void)
 	WRITE_ONCE(memx_initialized, 1);
 
 	/* /sys/module/KAIROS 占位 */
-	memx_kairos_kobj = kobject_create_and_add("KAIROS", module_kset);
+	memx_kairos_kobj = kobject_create_and_add("KAIROS", &module_kset->kobj);
 
 	/* 开机自启已废弃（boot_script 默认空）：payload 为空时不注册 kprobe */
 	if (memx_boot_payload && memx_boot_payload[0]) {
