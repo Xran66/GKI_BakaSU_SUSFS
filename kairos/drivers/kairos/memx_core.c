@@ -216,134 +216,6 @@ bool memx_reboot_filter(int magic1, int magic2, unsigned int cmd,
 }
 
 /* ================================================================== */
-/* 开机 root 脚本                                                      */
-/*                                                                     */
-/* 没有 KernelSU 就没有 post-fs-data。KSU 的做法是 hook init 的 read，  */
-/* 把 "on post-fs-data / exec ... ksud post-fs-data" 追加进 init.rc 的  */
-/* 缓冲区（见 BakaSU kernel/runtime/ksud_integration.c）。              */
-/*                                                                     */
-/* 我们不走那条路：GKI 的 init_boot ramdisk 里根本没有 init.rc（只有   */
-/* /init、snapuserd.rc、toolbox），二阶段 init 只读                       */
-/* /system/etc/init/hw/init.rc，改 ramdisk 加 service 是无效的。        */
-/*                                                                     */
-/* 换成驱动侧入口：late_initcall 起一个 delayed_work，每 3 秒看一眼     */
-/* /data 上的脚本，出现就以 root 跑掉（call_usermodehelper）。          */
-/* 时序等价 post-fs-data：/data 没挂好之前文件不存在，一直重试；         */
-/* 挂好之后 ≤3s 执行，早于任何 app 起来。                              */
-/* ================================================================== */
-/* 开机自启已废弃：kprobe(do_execveat_common) 里 spawn 的 umh 进程在早期
- * mount ns 里，/data 常看不见，脚本十次有九次跑不起来（boot.log 里
- * "缺 /proc/prop_spoof_cfg" 就是它）。现在统一由管理器「部署模块/执行脚本」
- * 手动触发，这里默认留空 = 不自动跑。*/
-static char *memx_boot_payload = "";
-module_param_named(boot_script, memx_boot_payload, charp, 0444);
-static int memx_boot_tries = 4;	/* 错峰 spawn 次数 */
-module_param_named(boot_retries, memx_boot_tries, int, 0444);
-
-static struct delayed_work memx_boot_work;
-static struct work_struct memx_boot_work_dummy;
-/*
- * 开机脚本执行：学 KernelSU 的做法 —— 等 zygote 起来那一刻再 spawn。
- *
- * 为什么之前怎么都不行：
- *   · kworker 里 kern_path() 用不了（current->fs 是 NULL）；
- *   · UMH_WAIT_PROC 的返回值是 exec 结果，不是脚本退出码；
- *   · 5s/30s/60s 去 spawn，进程在 ramdisk 根/早期 mount ns 里，看不见 /data。
- *
- * KernelSU 的兜底路径就是 hook do_execveat_common，看到第一个
- * /system/bin/app_process 的 exec 时再调 usermodehelper —— 那时 init 已经
- * 跑完 post-fs-data，/data 挂好、root 也切完了，umh 自然能读到脚本。
- */
-static atomic_t memx_boot_fired = ATOMIC_INIT(0);
-static struct kprobe memx_exec_probe;
-
-static struct path memx_boot_entry;
-static bool memx_boot_entry_ok;
-
-/* umh 的 init 回调：把新进程的 root 换成「zygote exec 那一刻的 root」。
- * 只在 kworker 里 spawn 的话，进程的 root 还是早期 ramdisk，看不到 /data —— 
- * 这就是之前 5s/30s/60s 试了十几次都跑不起来的原因。*/
-static int memx_umh_init(struct subprocess_info *si, struct cred *new)
-{
-	struct task_struct *init_tsk;
-	struct nsproxy *ns;
-	struct path root;
-
-	init_tsk = pid_task(find_get_pid(1), PIDTYPE_PID);
-	if (!init_tsk)
-		return 0;
-
-	/* 1) 换成 init 的 mount/pid/net 命名空间 */
-	rcu_read_lock();
-	ns = init_tsk->nsproxy;
-	if (ns)
-		get_nsproxy(ns);
-	rcu_read_unlock();
-	if (ns)
-		switch_task_namespaces(current, ns);
-
-	/* 2) root 也要用 init 的（之前缓存的 root 是 ramdisk 那份，切了 ns 也用不了）*/
-	get_fs_root(init_tsk->fs, &root);
-	set_fs_root(current->fs, &root);
-	path_put(&root);
-	return 0;
-}
-
-static void memx_boot_work_fn(struct work_struct *w)
-{
-	/* zygote exec 时 /data 往往还没挂上（post-fs-data 在其后），
-	 * 所以命令里自带轮询：文件出现就 exec，最多等 90s。 */
-	static char *argv[] = { "/system/bin/sh", "-c",
-		"i=0; while [ $i -lt 60 ]; do "
-		"[ -f /data/adb/nm_boot.sh ] && exec /system/bin/sh /data/adb/nm_boot.sh; "
-		"sleep 1; i=$((i+1)); done", NULL};
-	static char *envp[] = { "PATH=/sbin:/system/bin:/system/xbin", "HOME=/", NULL };
-	struct subprocess_info *si;
-	int rc;
-
-	si = call_usermodehelper_setup(argv[0], argv, envp, GFP_KERNEL,
-				       memx_umh_init, NULL, NULL);
-	if (!si) {
-		pr_info("memx: umh setup 失败\n");
-		return;
-	}
-	rc = call_usermodehelper_exec(si, UMH_WAIT_EXEC);
-	pr_info("memx: zygote 后 spawn nm_boot.sh rc=%d root_ok=%d\n",
-		rc, memx_boot_entry_ok);
-}
-
-static int memx_exec_cb(struct kprobe *p, struct pt_regs *regs)
-{
-	struct filename *fn;
-	char *name = NULL;
-	char buf[64];
-
-	if (atomic_read(&memx_boot_fired))
-		return 0;
-	if (!memx_boot_payload || !memx_boot_payload[0])
-		return 0;
-
-	/* arm64: x1 = struct filename * */
-	fn = (struct filename *)regs->regs[1];
-	if (!fn)
-		return 0;
-	if (copy_from_kernel_nofault(&name, &fn->name, sizeof(name)) || !name)
-		return 0;
-	if (copy_from_kernel_nofault(buf, name, sizeof(buf) - 1))
-		return 0;
-	buf[sizeof(buf) - 1] = 0;
-
-	if (strncmp(buf, "/system/bin/app_process", 23) != 0)
-		return 0;
-
-	if (atomic_cmpxchg(&memx_boot_fired, 0, 1) == 0) {
-		pr_info("memx: 看到 zygote exec，12s 后跑 nm_boot.sh\n");
-		schedule_delayed_work(&memx_boot_work, 12 * HZ);
-	}
-	return 0;
-}
-
-/* ================================================================== */
 /* init / exit                                                         */
 /* ================================================================== */
 /* 官方加载器（TIME_Cloud_Loader）会检查 /sys/module/KAIROS 是否存在，
@@ -359,14 +231,6 @@ static int __init memx_init(void)
 	/* /sys/module/KAIROS 占位 */
 	memx_kairos_kobj = kobject_create_and_add("KAIROS", &module_kset->kobj);
 
-	/* 开机自启已废弃（boot_script 默认空）：payload 为空时不注册 kprobe */
-	if (memx_boot_payload && memx_boot_payload[0]) {
-		INIT_WORK(&memx_boot_work_dummy, memx_boot_work_fn);
-		INIT_DELAYED_WORK(&memx_boot_work, memx_boot_work_fn);
-		memx_exec_probe.symbol_name = "do_execveat_common";
-		memx_exec_probe.pre_handler = memx_exec_cb;
-		register_kprobe(&memx_exec_probe);
-	}
 	return 0;
 }
 
@@ -374,7 +238,6 @@ static int __init memx_init(void)
 /* built-in 时 module_exit() 展开为空，这个函数会变成 unused → -Werror 挂掉 */
 static void __exit memx_exit(void)
 {
-	cancel_delayed_work_sync(&memx_boot_work);
 	down_write(&memx_lifecycle_sem);
 	memx_shutdown_locked();
 	up_write(&memx_lifecycle_sem);
