@@ -814,15 +814,41 @@ static int map_hide_count;
  * 改成开机时把 adreno/kgsl 相关文件的 inode 抓下来，读 maps 时纯比较。 */
 bool prop_spoof_hide_map(struct vm_area_struct *vma)
 {
+	const char *n;
 	struct inode *ino;
 	int i;
 
-	if (!map_hide_count || !is_target())
+	if (!is_target())
 		return false;
-	if (!vma || !vma->vm_file)
+	if (!vma || !vma->vm_file || !vma->vm_file->f_path.dentry)
 		return false;
+	/* 名字匹配（无分配、无大栈缓冲——上一版 d_path+strstr 打爆栈的教训）。
+	 * dentry 名对 "(deleted)" 变体同样命中（后缀是 maps 打印时加的）。 */
+	/* 文件名 + 父目录名都参与匹配（qcom 等落在目录名里的残留） */
+	{
+		struct dentry *d = vma->vm_file->f_path.dentry;
+
+		if (d && d->d_name.name) {
+			n = d->d_name.name;
+			if (strstr(n, "adreno") || strstr(n, "kgsl") ||
+			    strstr(n, "libgsl") || strstr(n, "llvm-glnext") ||
+			    strstr(n, "q3dtools") || strstr(n, "eglSubDriver") ||
+			    strstr(n, "qcom") || strstr(n, "qualcomm") ||
+			    /* dmabuf 的 dentry 名是通用 "dmabuf"，"qcom,system"
+			     * 是 dname 回调动态拼的 —— 直接整类隐藏 */
+			    strstr(n, "dmabuf"))
+				return true;
+		}
+		d = d ? d->d_parent : NULL;
+		if (d && d->d_name.name) {
+			n = d->d_name.name;
+			if (strstr(n, "qcom") || strstr(n, "qualcomm"))
+				return true;
+		}
+	}
+	/* 兜底：开机抓的 inode 表（覆盖改名/换路径的场景） */
 	ino = vma->vm_file->f_inode;
-	if (!ino)
+	if (!ino || !map_hide_count)
 		return false;
 	for (i = 0; i < map_hide_count; i++)
 		if (map_hide_inodes[i] == ino)
