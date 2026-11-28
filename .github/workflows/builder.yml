@@ -1,0 +1,239 @@
+name: ① 一键构建内核（填参数）
+
+# 自助构建入口：Actions → 左侧「① 一键构建内核（填参数）」→ Run workflow
+# 只改需要的选项，其余保持默认；产物在运行页面底部 Artifacts 里下载。
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_version:
+        description: "内核源码版本"
+        required: true
+        type: choice
+        default: "android15-6.6.118（10-29 susfs 锁定配对）"
+        options:
+          - "android15-6.6.118（10-29 susfs 锁定配对）"
+          - "gen6-android16-6.12.96（可开机，推荐）"
+          - "跟随分支最新（可能因 KMI 代数跳变而卡开机）"
+          - "自定义 commit"
+
+      custom_common_commit:
+        description: "自定义 kernel/common commit（仅上面选“自定义”时生效；填 refs/tags/xxx 或裸 SHA）"
+        required: false
+        type: string
+        default: ""
+
+      bakasu_version:
+        description: "KSU 源版本（BakaSU / SukiSU-Nova）"
+        required: true
+        type: choice
+        default: "SukiSU-Nova 10-30（b16e899a，10-29 selinux 修复）"
+        options:
+          - "SukiSU-Nova 10-30（b16e899a，10-29 selinux 修复）"
+          - "10-31（516d3e87，已验证）"
+          - "跟随 main 最新"
+          - "自定义 commit"
+
+      enable_kpm:
+        description: "KPM（kpimg 打入 Image，配合 Nova KPM 内核支持）"
+        required: true
+        type: boolean
+        default: true
+
+      custom_bakasu_commit:
+        description: "自定义 BakaSU commit（仅上面选“自定义”时生效）"
+        required: false
+        type: string
+        default: ""
+
+      susfs_version:
+        description: "SUSFS 版本（分支随内核版本自动选择）"
+        required: true
+        type: choice
+        default: "锁定 10-29（官方，11 月版破坏 SELinux）"
+        options:
+          - "锁定 10-29（官方，11 月版破坏 SELinux）"
+          - "跟随 susfs4ksu 最新（11 月版可能破坏 SELinux）"
+
+      force_kver:
+        description: "版本串对齐 vivo 基线（6.12.58-...-abogki503021821-4k）"
+        required: true
+        type: choice
+        default: "否（用真实版本串）"
+        options:
+          - "否（用真实版本串）"
+          - "是（伪装成 6.12.58 vivo 基线）"
+
+      add_propspoof:
+        description: "内建属性/机型伪装（prop_spoof：kprobe 按 app 伪装 + cpuinfo/sys）"
+        required: true
+        type: boolean
+        default: true
+
+      add_lineagehide:
+        description: "Lineage_Hide（procfs 路径清洗 + KSU SELinux 探针加固）"
+        required: true
+        type: boolean
+        default: true
+
+      add_panicdebug:
+        description: "调试模式（挂死转 panic + 10s 热重启，ramoops 留日志；日常不要开）"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: 编译内核
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y repo git python3 zip unzip rsync bc flex bison \
+            build-essential libssl-dev libelf-dev zlib1g-dev zstd openssl
+
+      - name: 克隆 lunatellus 构建工程
+        run: git clone --depth 1 https://github.com/lunatellus/elden-kernel.git build
+
+      - name: 覆盖我们的构建脚本与 prop_spoof 源码
+        run: |
+          cp elden/build-elden-ours.sh build/build-bakasu-elden.sh
+          cp elden/prop_spoof.c build/prop_spoof.c
+          cp -r susfs_files build/susfs_files
+          # 内置 lineage_hide 补丁（上游仓库已删除，改为仓库自带）
+          rm -rf build/lineage_hide
+          cp -r lineage_hide build/lineage_hide
+          chmod 755 build/build-bakasu-elden.sh build/lineage_hide/*.sh
+
+      - name: 解析参数
+        id: resolve
+        env:
+          KVER: ${{ inputs.kernel_version }}
+          KCUSTOM: ${{ inputs.custom_common_commit }}
+          BVER: ${{ inputs.bakasu_version }}
+          BCUSTOM: ${{ inputs.custom_bakasu_commit }}
+          SVER: ${{ inputs.susfs_version }}
+        run: |
+          # ---- kernel/common ----
+          case "$KVER" in
+            android15*)  COMMON="refs/tags/android15-6.6.118_r00"; KDESC="tag android15-6.6.118_r00"; GB="common-android15-6.6-2026-10"; SKVER="android15-6.6" ;;
+            gen6*)        COMMON="refs/tags/android16-6.12.96_r00"; KDESC="tag android16-6.12.96_r00"; GB=""; SKVER="android16-6.12" ;;
+            跟随分支*)   COMMON="";                                 KDESC="tip（未锁定）"; GB=""; SKVER="android16-6.12" ;;
+            自定义*)     COMMON="$KCUSTOM";                         KDESC="自定义 ${KCUSTOM:-<空>}"; GB=""; SKVER="android16-6.12" ;;
+            *)           COMMON="refs/tags/android15-6.6.118_r00"; KDESC="tag android15-6.6.118_r00"; GB="common-android15-6.6-2026-10"; SKVER="android15-6.6" ;;
+          esac
+
+          # ---- KSU（BakaSU / SukiSU-Nova）----
+          case "$BVER" in
+            SukiSU-Nova*) NOVA="b16e899a555e9b96aa1225f049cd7274820ca5b8"; BDESC="SukiSU-Nova 10-30 (b16e899a)"; KKIND="nova" ;;
+            10-31*)      NOVA=""; BAKASU="516d3e87fbc986ccefdde2c2765f1700612441a9"; BDESC="10-31 (516d3e87)"; KKIND="bakasu" ;;
+            跟随*)       NOVA=""; BAKASU="";                                     BDESC="main tip"; KKIND="bakasu" ;;
+            自定义*)     NOVA=""; BAKASU="$BCUSTOM";                             BDESC="自定义 ${BCUSTOM:-<空>}"; KKIND="bakasu" ;;
+            *)           NOVA="b16e899a555e9b96aa1225f049cd7274820ca5b8"; BAKASU=""; BDESC="SukiSU-Nova 10-30 (b16e899a)"; KKIND="nova" ;;
+          esac
+
+          # ---- SUSFS ----
+          case "$SVER" in
+            锁定*)       SUSFS="9311456319618ea1e35961d3f041bc0f16e4e2ec"; SDESC="锁定 10-29 (93114563, $SKVER 分支)" ;;
+            *)           SUSFS="";                                          SDESC="susfs4ksu tip" ;;
+          esac
+
+          # ---- 版本串对齐（vivo 基线）----
+          if [[ "${{ inputs.force_kver }}" == 是* ]]; then
+            KV_SUB=58; KV_ID=ogki503021821
+            KV_TS="Thu Apr 16 22:41:27 UTC 2026"; KV_DESC=650e74cc80ec
+          else
+            KV_SUB=""; KV_ID=""; KV_TS=""; KV_DESC=""
+          fi
+          {
+            echo "kver_sub=$KV_SUB"
+            echo "kver_id=$KV_ID"
+            echo "kver_ts=$KV_TS"
+            echo "kver_desc=$KV_DESC"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "common=$COMMON" >> "$GITHUB_OUTPUT"
+          echo "bakasu=$BAKASU" >> "$GITHUB_OUTPUT"
+          echo "nova=$NOVA" >> "$GITHUB_OUTPUT"
+          echo "kkind=$KKIND" >> "$GITHUB_OUTPUT"
+          echo "susfs=$SUSFS" >> "$GITHUB_OUTPUT"
+          echo "susfs_branch=gki-$SKVER" >> "$GITHUB_OUTPUT"
+          echo "susfs_kver=$SKVER" >> "$GITHUB_OUTPUT"
+          echo "gki_branch=$GB" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### 本轮构建参数"
+            echo ""
+            echo "| 项目 | 取值 |"
+            echo "|---|---|"
+            echo "| 内核源码 | $KDESC |"
+            echo "| BakaSU | $BDESC |"
+            echo "| SUSFS | $SDESC |"
+            echo "| prop_spoof（属性/机型伪装） | ${{ inputs.add_propspoof }} |"
+            echo "| Lineage_Hide（路径清洗 + SELinux 加固） | ${{ inputs.add_lineagehide }} |"
+            echo "| 调试模式（panic 热重启） | ${{ inputs.add_panicdebug }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 编译（约 40-50 分钟）
+        env:
+          ADD_PROPSPOOF: ${{ inputs.add_propspoof && '1' || '0' }}
+          ADD_LINEAGEHIDE: ${{ inputs.add_lineagehide && '1' || '0' }}
+          ADD_PANICDEBUG: ${{ inputs.add_panicdebug && '1' || '0' }}
+          GKI_COMMON_COMMIT: ${{ steps.resolve.outputs.common }}
+          GKI_BRANCH: ${{ steps.resolve.outputs.gki_branch }}
+          BAKASU_COMMIT: ${{ steps.resolve.outputs.bakasu }}
+          KSU_KIND: ${{ steps.resolve.outputs.kkind }}
+          NOVA_COMMIT: ${{ steps.resolve.outputs.nova }}
+          SUSFS_COMMIT: ${{ steps.resolve.outputs.susfs }}
+          SUSFS_BRANCH: ${{ steps.resolve.outputs.susfs_branch }}
+          SUSFS_KVER: ${{ steps.resolve.outputs.susfs_kver }}
+          ENABLE_KPM: ${{ inputs.enable_kpm && '1' || '0' }}
+          KVER_SUBLEVEL: ${{ steps.resolve.outputs.kver_sub }}
+          KVER_BUILD_ID: ${{ steps.resolve.outputs.kver_id }}
+          KVER_TIMESTAMP: ${{ steps.resolve.outputs.kver_ts }}
+          KVER_GITDESC: ${{ steps.resolve.outputs.kver_desc }}
+        run: |
+          cd build
+          JOBS=8 ./build-bakasu-elden.sh
+
+      - name: 读取版本串并写摘要
+        if: always()
+        run: |
+          cd build
+          BOOT=$(find out -name boot.img | head -1 || true)
+          if [ -n "$BOOT" ]; then
+            VER=$(strings "$BOOT" | grep -m1 "Linux version" | cut -c1-110 || true)
+            DIR=$(dirname "$BOOT")
+            SHA=$(sha256sum "$BOOT" | cut -d' ' -f1)
+            {
+              echo ""
+              echo "### 产物"
+              echo ""
+              echo '```'
+              echo "version: $VER"
+              echo "sha256 : $SHA"
+              ls -la "$DIR"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### 产物缺失（构建失败）" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v6
+        with:
+          name: kernel-${{ github.run_number }}
+          path: build/out/
+          if-no-files-found: error
+          retention-days: 14

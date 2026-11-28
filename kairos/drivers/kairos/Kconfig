@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# 内存访问 / 输入注入辅助驱动（in-tree）
+#
+config MEMX
+	tristate "Memory range helper"
+	depends on ARM64
+	default n
+	help
+	  In-tree helper exposing a small ioctl interface for reading and
+	  writing another process's address space, plus a touch injection path.
+
+	  Nothing is built as a loadable module: everything is linked into the
+	  kernel image, so it never shows up in /proc/modules and does not set
+	  the module taint bit. Call sites in the core kernel are placed by
+	  source patching (see patches/), so nothing appears in
+	  /sys/kernel/debug/kprobes/list either.
+
+	  If unsure, say N.
+
+config MEMX_GYRO_HOOK
+	bool "MEMX: hook __sys_sendto for sample rewrite"
+	depends on MEMX
+	default y
+	help
+	  Patches net/socket.c:__sys_sendto() to call into the driver so it can
+	  rewrite sensor samples. Requires the matching source patch.
+
+config MEMX_DEBUG
+	bool "MEMX: verbose logging"
+	depends on MEMX
+	default n
+	help
+	  Keep this OFF for production. Every pr_info()/pr_debug() shows up in
+	  dmesg, which is a trivially readable detection surface.

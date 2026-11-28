@@ -1,0 +1,50 @@
+name: Probe ACK refs (tags / commit reachability)
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: "要验证可达性的 commit（留空只列 tag）"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: List android16-6.12 tags and branches
+        run: |
+          set -x
+          git clone --bare --filter=blob:none --single-branch --branch android16-6.12 \
+            https://android.googlesource.com/kernel/common probe.git
+          cd probe.git
+          git ls-remote origin 'refs/tags/android16-6.12*' | tail -20
+          echo "=== tip ==="
+          git log --oneline -1 FETCH_HEAD 2>/dev/null || true
+          git ls-remote origin refs/heads/android16-6.12
+
+      - name: Check commit reachability and full SHA
+        if: ${{ inputs.commit != '' }}
+        run: |
+          cd probe.git
+          # 补历史直到找到目标 commit（最多 unshallow）
+          git fetch --depth=10000 origin android16-6.12 || true
+          if git cat-file -e "${{ inputs.commit }}^{commit}" 2>/dev/null; then
+            echo "FOUND in depth=10000"
+            git log -1 --format='%H %cd %s' --date=iso "${{ inputs.commit }}"
+          else
+            echo "NOT in depth=10000, trying unshallow..."
+            git fetch --unshallow origin android16-6.12 || true
+            if git cat-file -e "${{ inputs.commit }}^{commit}" 2>/dev/null; then
+              echo "FOUND after unshallow"
+              git log -1 --format='%H %cd %s' --date=iso "${{ inputs.commit }}"
+            else
+              echo "NOT REACHABLE from android16-6.12 at all"
+              exit 1
+            fi
+          fi

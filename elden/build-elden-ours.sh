@@ -1,0 +1,470 @@
+#!/usr/bin/env bash
+set -euo pipefail
+BUILD_NUMBER=${KVER_BUILD_ID:-$(/usr/bin/shuf -i 10000000-99999999 -n 1)}
+export BUILD_NUMBER
+# 版本串时间戳（内核 banner / uname -v 用）
+if [[ -n ${KVER_TIMESTAMP:-} ]]; then
+    export KBUILD_BUILD_TIMESTAMP="$KVER_TIMESTAMP"
+fi
+
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+source "$ROOT/boot.conf"
+WORK=$ROOT/.work
+KERNEL=$WORK/kernel
+DIST=$WORK/dist
+JOBS=${JOBS:-8}
+
+# --- Xran66 扩展开关 ---
+# ADD_PROPSPOOF=1    : 内建 prop_spoof（编译期惰性，cfg start 前不生效）
+# ADD_LINEAGEHIDE=1  : 应用 Lineage_Hide procfs 清洗补丁（bootloop 嫌疑，默认关）
+ADD_PROPSPOOF=${ADD_PROPSPOOF:-1}
+ADD_LINEAGEHIDE=${ADD_LINEAGEHIDE:-0}
+PROP_SPOOF_SRC=${PROP_SPOOF_SRC:-$ROOT/prop_spoof.c}
+# SUSFS 锁定：11-01/11-02 的 selinux_hide 重构 + priority_uid_filter 会导致掉 SELinux，
+# 默认锁 2026-10-29 当天最后提交 6b60a305（KernelSU: Fix compiler error）。
+# SUSFS_COMMIT 置空则跟随分支 tip。
+SUSFS_COMMIT=${SUSFS_COMMIT:-9311456319618ea1e35961d3f041bc0f16e4e2ec}
+SUSFS_SINCE=${SUSFS_SINCE:-2026-10-27}
+# SUSFS 分支/patch 后缀参数化：android16-6.12（gen6 默认）/ android15-6.6（118 用）
+SUSFS_URL=${SUSFS_URL:-https://gitlab.com/simonpunk/susfs4ksu.git}
+SUSFS_BRANCH=${SUSFS_BRANCH:-gki-android16-6.12}
+SUSFS_KVER=${SUSFS_KVER:-android16-6.12}
+# KSU 源：bakasu（默认）| nova（SukiSU-Nova builtin）
+KSU_KIND=${KSU_KIND:-bakasu}
+NOVA_COMMIT=${NOVA_COMMIT:-b16e899a555e9b96aa1225f049cd7274820ca5b8}
+KSU_WORK=$WORK/BakaSU
+# KPM：kpimg 打入（kptools -p）
+ENABLE_KPM=${ENABLE_KPM:-0}
+KSU_DIR=${KSU_DIR:-bakasu}
+[[ $KSU_KIND == nova ]] && KSU_DIR=kernelsu
+# ADD_PANICDEBUG=1 : bootloop 调试模式——挂死转 panic（softlockup/hung_task）+ panic 10s 后
+# 自动热重启（RAM 不清），ramoops 保留死机前内核日志，进 recovery 读 /sys/fs/pstore。
+ADD_PANICDEBUG=${ADD_PANICDEBUG:-0}
+# GKI_BRANCH：内核 manifest 分支。默认跟 HEAD（11 月起 KMI 代数已跳到 android16-7，
+# 与 10 月 era 的 vendor 模块不兼容会挂死）；设为 common-android16-6.12-2026-10
+# 可锁定回 android16-6 代（与 lunatellus 1101 能开机版本同 era）。
+GKI_BRANCH=${GKI_BRANCH:-common-android16-6.12}
+# GKI_COMMON_COMMIT：repo 同步后把 kernel/common 精确 checkout 到指定 commit。
+# gabad7aaa7f9f = lunatellus 1101 能开机版本的确切源码（android16-6 / KMI gen 6 era）。
+GKI_COMMON_COMMIT=${GKI_COMMON_COMMIT:-}
+
+fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+
+init_workspace() {
+    [[ $WORK == "$ROOT/.work" && ! -L $WORK ]] || fail "invalid workspace"
+    mkdir -p "$WORK"
+    if [[ ! -f $WORK/.elden-kernel-workspace ]]; then
+        [[ -z $(find "$WORK" -mindepth 1 -maxdepth 1 -print -quit) ]] ||
+            fail "refusing an existing, unowned workspace: $WORK"
+        printf 'Generated Elden kernel workspace.\n' > "$WORK/.elden-kernel-workspace"
+    fi
+}
+
+sync_git() {
+    local path=$1 url=$2 branch=$3 full=${4:-false}
+    [[ $path == "$WORK/"* && ! -L $path ]] || fail "invalid checkout: $path"
+    if [[ ! -e $path ]]; then
+        local depth=()
+        [[ $full == true ]] || depth=(--depth=1)
+        # GitHub 偶发 401/限流（could not read Username）→ 重试 3 次，
+        # 并关闭交互提示，避免直接以 exit 128 退出
+        local try rc
+        for try in 1 2 3; do
+            rc=0
+            GIT_TERMINAL_PROMPT=0 git clone --single-branch --branch "$branch" \
+                "${depth[@]}" "$url" "$path" || rc=$?
+            [[ $rc == 0 ]] && break
+            echo "sync_git: clone $url 失败 (rc=$rc)，第 $try 次重试" >&2
+            rm -rf -- "$path"
+            sleep $((try * 5))
+        done
+        [[ $rc == 0 ]] || fail "clone failed after retries: $url"
+    else
+        [[ $(git -C "$path" remote get-url origin) == "$url" ]] || fail "wrong origin: $path"
+    fi
+    if [[ $full == true ]]; then
+        local shallow=()
+        [[ $(git -C "$path" rev-parse --is-shallow-repository) == false ]] || shallow=(--unshallow)
+        git -C "$path" fetch "${shallow[@]}" --tags origin "$branch"
+    else
+        git -C "$path" fetch --depth=1 origin "$branch"
+    fi
+    git -C "$path" checkout --force -B "$branch" FETCH_HEAD
+    git -C "$path" clean -fd
+}
+
+sync_sources() {
+    [[ $KERNEL == "$WORK/kernel" && ! -L $KERNEL && ! -L $KERNEL/common ]] || fail "invalid kernel workspace"
+    mkdir -p "$KERNEL"
+    if [[ -e $KERNEL/common/.git ]]; then
+        git -C "$KERNEL/common" reset --hard HEAD
+        git -C "$KERNEL/common" clean -fd
+    fi
+    (
+        cd "$KERNEL"
+        repo init -q -u https://android.googlesource.com/kernel/manifest \
+            -b "$GKI_BRANCH" --depth=1
+        repo sync -c -d -j"$JOBS" --no-tags --no-clone-bundle --no-verify --no-auto-gc
+    )
+    if [[ -n $GKI_COMMON_COMMIT ]]; then
+        local r=$(git -C "$KERNEL/common" remote | head -1)
+        [[ -n $r ]] || fail "kernel/common has no git remote"
+        if [[ $GKI_COMMON_COMMIT == refs/tags/* ]]; then
+            # tag 形式：gen-6 历史已从分支不可达，tag 是唯一入口
+            git -C "$KERNEL/common" fetch "$r" "$GKI_COMMON_COMMIT"
+            git -C "$KERNEL/common" checkout --force FETCH_HEAD
+        else
+            # googlesource 禁止按 SHA fetch 且不支持 --shallow-since：先按提交数加深，
+            # 锁定点仍取不到就 unshallow 拉全量（自适应，一次跑通）
+            local branch=${GKI_BRANCH#common-}
+            git -C "$KERNEL/common" fetch --depth=6000 "$r" "$branch" || true
+            git -C "$KERNEL/common" cat-file -e "$GKI_COMMON_COMMIT^{commit}" 2>/dev/null ||
+                git -C "$KERNEL/common" fetch --unshallow "$r" "$branch"
+            git -C "$KERNEL/common" checkout --force "$GKI_COMMON_COMMIT"
+        fi
+        git -C "$KERNEL/common" clean -fd
+        echo "kernel/common pinned to $(git -C "$KERNEL/common" log -1 --format='%h %cd %s' --date=short | head -c 100)"
+    fi
+    if [[ $KSU_KIND == nova ]]; then
+        sync_git "$WORK/Nova" https://github.com/SukiSU-Nova/SukiSU-Nova.git builtin true
+        if [[ -n ${NOVA_COMMIT:-} ]]; then
+            git -C "$WORK/Nova" checkout --force "$NOVA_COMMIT"
+        fi
+        echo "Nova: pinned to $(git -C "$WORK/Nova" log -1 --format='%h %cd %s' --date=short | head -c 90)"
+        KSU_WORK=$WORK/Nova
+    else
+        sync_git "$WORK/BakaSU" https://github.com/Baka-SU/BakaSU.git main true
+        if [[ -n ${BAKASU_COMMIT:-} ]]; then
+            git -C "$WORK/BakaSU" checkout --force "$BAKASU_COMMIT"
+            echo "BakaSU: pinned to $(git -C "$WORK/BakaSU" log -1 --format='%h %cd %s' --date=short | head -c 90)"
+        fi
+        KSU_WORK=$WORK/BakaSU
+    fi
+    # susfs 官方 10-29 锁定状态（simonpunk/susfs4ksu @ 93114563, v2.3.0）已 vendored
+    # 在仓库 susfs_files/ 下（CI 的 gitlab git 传输对锁定 commit 的 tree 缺失，raw 走主节点，
+    # 均不可靠——vendored 是唯一稳定路径）。
+    [[ -f $ROOT/susfs_files/50_add_susfs_in_gki-android15-6.6.patch ]] ||
+        fail "susfs_files 缺失（vendored 10-29 susfs）"
+    SUSFS_PATCH=$ROOT/susfs_files/50_add_susfs_in_gki-android15-6.6.patch
+    echo "susfs: vendored 10-29 (v2.3.0, 93114563) ready"
+    sync_git "$WORK/AnyKernel3" https://github.com/osm0sis/AnyKernel3.git master
+    git -C "$WORK/AnyKernel3" fetch --depth=1 origin \
+        +refs/heads/arm64-tools:refs/remotes/origin/arm64-tools
+    if [[ $ADD_LINEAGEHIDE == 1 ]]; then
+        # 上游 null07089/Lineage_Hide 已删除，只用仓库内置补丁（由 workflow 复制进 build/）
+        if [[ -d $ROOT/lineage_hide ]] && [[ -f $ROOT/lineage_hide/patch-kernel.sh ]]; then
+            echo "lineage_hide: 使用仓库内置补丁 $ROOT/lineage_hide"
+        else
+            echo "WARN: 未找到内置 lineage_hide 补丁，跳过 procfs 清洗/SELinux 加固" >&2
+        fi
+    fi
+}
+
+lineage_hide_dir() {
+    if [[ -d $ROOT/lineage_hide ]] && [[ -f $ROOT/lineage_hide/patch-kernel.sh ]]; then
+        printf '%s\n' "$ROOT/lineage_hide"
+    else
+        printf '%s\n' "$WORK/lineage_hide/scripts"
+    fi
+}
+
+apply_patch() {
+    local tree=$1 patch=$2
+    git -C "$tree" apply --check "$patch"
+    git -C "$tree" apply "$patch"
+}
+
+write_version() {
+    local source=$1 output=$2
+    python3 -I - "$source" "$output" <<'PY'
+from pathlib import Path
+import re
+import subprocess
+import sys
+source, output = map(Path, sys.argv[1:])
+def git(*args):
+    return subprocess.check_output(['git', '-C', str(source), *args], text=True).strip()
+assert git('rev-parse', '--is-shallow-repository') == 'false', 'BakaSU needs full history'
+tag = subprocess.run(['git', '-C', str(source), 'describe', '--abbrev=0', '--tags'],
+                     text=True, capture_output=True)
+values = {
+    'KSU_LOCAL_VERSION': git('rev-list', '--count', 'HEAD'),
+    'KSU_TAG_NAME': tag.stdout.strip() if tag.returncode == 0 else 'untagged',
+    'KSU_COMMIT_SHA': git('rev-parse', '--short=8', 'HEAD') + '-dirty',
+    'KSU_BRANCH_NAME': git('branch', '--show-current') or 'detached',
+}
+# The generated payload includes our Kleaf adapter, so do not claim a pristine upstream build.
+assert all(re.fullmatch(r'[A-Za-z0-9._/+~-]+', value) for value in values.values())
+output.write_text(''.join(f'{key} := {value}\n' for key, value in values.items()))
+PY
+}
+
+integrate() {
+    local common=$KERNEL/common
+    # 官方 patch 基于 10-29 时代的 ACK 上下文；6.6.118 的 exec.c/task_mmu.c 上下文有漂移，
+    # git apply --check 会拒。用 GNU patch fuzz 宽松模式（Build_Lenovo 先例：个别 hunk
+    # reject 不影响构建与 susfs 主功能，fs/susfs.c 本体由下方 cp 直接覆盖）。
+    ( cd "$common" && patch -p1 --forward --fuzz=3 < "$SUSFS_PATCH" ) || \
+        echo "WARN: susfs patch 部分 hunk 未应用（118 上下文漂移），fs/susfs.c 仍为 vendored 完整版"
+    cp "$ROOT/susfs_files/fs/susfs.c" "$common/fs/susfs.c"
+    cp "$ROOT/susfs_files/include_linux/"susfs*.h "$common/include/linux/"
+    mkdir -p "$common/drivers/$KSU_DIR"
+    if [[ $ADD_LINEAGEHIDE == 1 ]]; then
+        # KSU selinux_hide 加固必须在 git archive 之前打并提交：
+        # 堵住 selinuxfs context/access/setprocattr 三条回退探针路径
+        # （对应用探测 u:r:adbroot:s0 / su:s0 返回 -EINVAL）
+        LHD=$(lineage_hide_dir)
+        if [ -f "$LHD/selinux_hide_patch.sh" ]; then
+            bash "$LHD/selinux_hide_patch.sh" "$WORK/BakaSU" ||
+                echo "WARN: selinux_hide 加固失败，继续构建" >&2
+        else
+            echo "WARN: 未找到 selinux_hide_patch.sh，跳过" >&2
+        fi
+        git -C "$KSU_WORK" add -A
+        git -C "$KSU_WORK" -c user.email=ci@localhost -c user.name=ci \
+            commit -q -m "lineage_hide: harden ksu selinux_hide probes" ||
+            fail "Lineage_Hide: BakaSU commit 失败"
+        echo "Lineage_Hide: KSU selinux_hide hardened (adbroot/su probes blocked)"
+    fi
+    if [[ -n ${KVER_SUBLEVEL:-} ]]; then
+        local cur
+        cur=$(awk '/^SUBLEVEL = /{print $3; exit}' "$common/Makefile")
+        if [[ $cur != "$KVER_SUBLEVEL" ]]; then
+            sed -i "s/^SUBLEVEL = .*/SUBLEVEL = ${KVER_SUBLEVEL}/" "$common/Makefile"
+            echo "版本串: SUBLEVEL $cur -> ${KVER_SUBLEVEL}"
+        fi
+    fi
+    git -C "$KSU_WORK" archive HEAD kernel uapi LICENSE |
+        tar -x -C "$common/drivers/$KSU_DIR"
+    printf '\nsource "drivers/%s/kernel/Kconfig"\n' "$KSU_DIR" >> "$common/drivers/Kconfig"
+    printf '\nobj-$(CONFIG_KSU) += %s/kernel/\n' "$KSU_DIR" >> "$common/drivers/Makefile"
+    cp "$ROOT/kernel.fragment" "$common/arch/arm64/configs/elden.fragment"
+    cat >> "$common/arch/arm64/configs/elden.fragment" <<'FRAGEOF'
+CONFIG_KPM=y
+CONFIG_KSU_SUSFS=y
+CONFIG_KSU_SUSFS_SUS_PATH=y
+CONFIG_KSU_SUSFS_SUS_MOUNT=y
+CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
+CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
+CONFIG_KSU_SUSFS_SUS_KSTAT=y
+CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y
+CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+CONFIG_KSU_SUSFS_ENABLE_LOG=y
+CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+CONFIG_KSU_SUSFS_SUS_MAP=y
+CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER=y
+FRAGEOF
+    if [[ $ADD_PANICDEBUG == 1 ]]; then
+        # 注意：fragment 方式（BOOTPARAM_*）会被 ACK 构建的 KMI 配置校验丢弃（已实测），
+        # 因此直接改源码默认值，确保 panic 后 10s 自动热重启（RAM 不清，ramoops 留日志）。
+        sed -i 's/^int panic_timeout = CONFIG_PANIC_TIMEOUT;/int panic_timeout = 10;/' \
+            "$common/kernel/panic.c"
+        sed -i 's/CONFIG_BOOTPARAM_SOFTLOCKUP_PANIC_VALUE/1/g' "$common/kernel/watchdog.c"
+        sed -i 's/CONFIG_BOOTPARAM_HUNG_TASK_PANIC_VALUE/1/g' "$common/kernel/hung_task.c"
+        grep -q '^int panic_timeout = 10;' "$common/kernel/panic.c" ||
+            echo "WARN: panic.c panic_timeout patch not applied"
+        grep -q 'softlockup_panic.*= 1' "$common/kernel/watchdog.c" ||
+            echo "WARN: watchdog.c softlockup_panic patch not applied"
+        echo "panicdebug: source patched (panic_timeout=10, softlockup/hung_task panic on)"
+    fi
+    printf '\nexports_files(["arch/arm64/configs/elden.fragment"])\n' >> "$common/BUILD.bazel"
+    local patch
+    for patch in "$ROOT"/patches/*.patch; do
+        if [[ -n $SUSFS_COMMIT && $(basename -- "$patch") == susfs-compat.patch ]]; then
+            # susfs 锁定 10-29 时跳过 fs/susfs.c hunk：它按 tip 版文件布局写（creds 函数在 172 行），
+            # 10-29 版这两个函数在文件头部且有内部调用者，不存在 unused 告警，无需 #ifdef 包裹。
+            # read_write.c（新式 read hook 签名）和 fdinfo.c hunk 仍然需要，保留应用。
+            git -C "$common" apply --check --exclude=fs/susfs.c "$patch"
+            git -C "$common" apply --exclude=fs/susfs.c "$patch"
+        else
+            apply_patch "$common" "$patch"
+        fi
+    done
+    write_version "$KSU_WORK" "$common/drivers/$KSU_DIR/kernel/elden-version.mk" || true
+    # 版本串去 -dirty：打完 susfs/BakaSU/Lineage_Hide 补丁工作区必然是 dirty 状态。
+    # kleaf 的 scmversion 生成点随版本漂移（setlocalversion / stamp.bzl / build.sh），
+    # 这里对 build/ 与 common/ 下所有含 dirty 字样的构建脚本做全量清除。
+    for f in "$common/scripts/setlocalversion"; do
+        [ -f "$f" ] && sed -i 's/-dirty//g' "$f"
+    done
+    grep -rl --include='*.bzl' --include='*.sh' --include='*.py' --include='*.bazel' \
+        -e 'dirty' "$KERNEL/build" "$KERNEL/common" 2>/dev/null |
+        while IFS= read -r f; do
+            case "$f" in
+                */out/*|*/bazel-*/*) continue ;;
+            esac
+            sed -i 's/-maybe-dirty//g; s/--dirty//g; s/-dirty//g' "$f"
+            echo "dirty-strip: ${f#$KERNEL/}"
+        done
+    echo "version: -dirty suppressed"
+    if [[ $ADD_PROPSPOOF == 1 ]]; then
+        mkdir -p "$common/drivers/prop_spoof"
+        cp "$PROP_SPOOF_SRC" "$common/drivers/prop_spoof/prop_spoof.c"
+        printf 'ccflags-y += -DPROP_SPOOF_BUILTIN\nobj-y += prop_spoof.o\n' \
+            > "$common/drivers/prop_spoof/Makefile"
+        printf '\nobj-y += prop_spoof/\n' >> "$common/drivers/Makefile"
+        echo "prop_spoof: integrated (builtin, inert until cfg start)"
+    fi
+    if [[ $ADD_LINEAGEHIDE == 1 ]]; then
+        LHD=$(lineage_hide_dir)
+        if [ -f "$LHD/patch-kernel.sh" ]; then
+            bash "$LHD/patch-kernel.sh" "$common" ||
+                echo "WARN: procfs 清洗补丁失败（锚点不匹配），继续构建" >&2
+            echo "Lineage_Hide: procfs scrub 完成（自建补丁）"
+        else
+            echo "WARN: 未找到 patch-kernel.sh，跳过 procfs 清洗" >&2
+        fi
+    fi
+}
+
+check_config() {
+    local config=$1
+    grep -qx 'CONFIG_KSU=y' "$config" || fail "KSU is not built in"
+    grep -qx 'CONFIG_KSU_SUSFS=y' "$config" || fail "SUSFS is not enabled"
+    grep -qx 'CONFIG_MQ_IOSCHED_ADIOS=y' "$config" || fail "ADIOS is not built in"
+    grep -qx 'CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y' "$config" || fail "ADIOS is not the default I/O scheduler"
+    grep -qx 'CONFIG_TCP_CONG_BBR3=y' "$config" || fail "BBRv3 is not built in"
+    grep -qx 'CONFIG_DEFAULT_TCP_CONG="bbr3"' "$config" || fail "BBRv3 is not the default TCP congestion control"
+    grep -qx 'CONFIG_NET_SCH_FQ=y' "$config" || fail "FQ is not built in"
+    grep -qx 'CONFIG_DEFAULT_NET_SCH="fq"' "$config" || fail "FQ is not the default qdisc"
+    if grep -qx 'CONFIG_MODULE_SIG_PROTECT=y' "$config"; then
+        fail "MODULE_SIG_PROTECT is still enabled"
+    fi
+}
+
+build_image() {
+    rm -rf -- "$DIST"
+    mkdir "$DIST"
+    (
+        cd "$KERNEL"
+        ./tools/bazel --local_startup_timeout_secs=600 run --config=stamp --jobs="$JOBS" --make_jobs="$JOBS" \
+            --defconfig_fragment=//common:arch/arm64/configs/elden.fragment \
+            //common:kernel_aarch64_dist -- --destdir="$DIST"
+    )
+    [[ -s $DIST/Image ]] || fail "build produced no Image"
+    # 等长替换 git 描述段（如 gd92f18cbe947 -> g650e74cc80ec），保证 uname 与 /proc/version 同源
+    if [[ -n ${KVER_GITDESC:-} ]]; then
+        python3 - "$DIST/Image" "$KVER_GITDESC" <<'PYEOF'
+import re, sys
+path, desc = sys.argv[1], sys.argv[2]
+data = open(path, 'rb').read()
+pat = re.compile(rb'-android16-6-g[0-9a-f]{12}')
+n = 0
+def sub(m):
+    global n
+    n += 1
+    return b'-android16-6-g' + desc.encode()
+data = pat.sub(sub, data)
+open(path, 'wb').write(data)
+print('git 描述替换 %d 处 -> -android16-6-g%s' % (n, desc))
+PYEOF
+    fi
+    check_config "$DIST/kernel_aarch64_dot_config"
+}
+
+sign_boot() {
+    local input=$1 output=$2
+    local avbtool=$KERNEL/prebuilts/kernel-build-tools/linux-x86/bin/avbtool
+    local key=$KERNEL/$AVB_KEY_PATH
+    [[ -s $input ]] || fail "build produced no boot image"
+    cp "$input" "$output"
+    "$avbtool" erase_footer --image "$output"
+    "$avbtool" add_hash_footer --image "$output" \
+        --partition_name boot --partition_size "$BOOT_PARTITION_SIZE" \
+        --algorithm "$AVB_ALGORITHM" --key "$key" \
+        --rollback_index "$AVB_ROLLBACK_INDEX" \
+        --prop "com.android.build.boot.os_version:$AVB_OS_VERSION" \
+        --prop "com.android.build.boot.security_patch:$AVB_SECURITY_PATCH"
+    "$avbtool" verify_image --image "$output" --key "$key"
+}
+
+package_boot() {
+    local boot=$1 upstream=$2 destination=$3
+    [[ -s $boot ]] || fail "cannot package a missing or empty boot image"
+    [[ ! -e $destination && ! -L $destination ]] || fail "refusing to overwrite $destination"
+    local staging=$WORK/package
+    rm -rf -- "$staging"
+    mkdir "$staging"
+    git -C "$upstream" archive HEAD | tar -x -C "$staging"
+    git -C "$upstream" archive refs/remotes/origin/arm64-tools | tar -x -C "$staging/tools"
+    local updater=$staging/META-INF/com/google/android/update-binary
+    [[ $(grep -Fxc '  $bb --install -s bin;' "$updater") == 1 ]] || fail "AnyKernel3 BusyBox setup changed"
+    sed -i 's/^  \$bb --install -s bin;$/  $bb --install bin;/' "$updater"
+    rm -f -- "$staging/anykernel.sh" "$staging/Image" "$staging/boot.img"
+    cp "$ROOT/anykernel.sh" "$staging/anykernel.sh"
+    chmod 755 "$staging/anykernel.sh"
+    cp "$boot" "$staging/boot.img"
+    (cd "$staging" && zip -qr9 "$destination" .)
+    python3 -I - "$destination" "$boot" <<'PY'
+import hashlib
+from pathlib import Path
+import sys
+import zipfile
+archive, boot = sys.argv[1:]
+with zipfile.ZipFile(archive) as package:
+    assert package.namelist().count('boot.img') == 1
+    assert 'Image' not in package.namelist()
+    assert not any(name.startswith('.git/') for name in package.namelist())
+    assert package.testzip() is None, 'corrupt ZIP'
+    with package.open('boot.img') as stream, Path(boot).open('rb') as expected:
+        assert hashlib.file_digest(stream, 'sha256').digest() == hashlib.file_digest(expected, 'sha256').digest()
+PY
+}
+
+main() {
+    [[ $# == 0 ]] || fail "Usage: $0 (optional environment: JOBS)"
+    [[ $JOBS =~ ^[1-9][0-9]*$ ]] || fail "JOBS must be a positive integer"
+    local tool
+    for tool in repo git python3 zip tar sha256sum openssl; do
+        command -v "$tool" >/dev/null || fail "missing tool: $tool"
+    done
+    init_workspace
+    sync_sources
+    integrate
+    build_image
+    if [[ $ENABLE_KPM == 1 ]]; then
+        echo "KPM: patching kpimg into Image..."
+        curl -fLSs "https://raw.githubusercontent.com/SukiSU-Nova/SukiSU_patch/main/kpm/kptools-linux" -o "$WORK/kptools"
+        curl -fLSs "https://raw.githubusercontent.com/SukiSU-Nova/SukiSU_patch/main/kpm/kpimg" -o "$WORK/kpimg"
+        chmod +x "$WORK/kptools"
+        "$WORK/kptools" -p -s 123 -i "$DIST/Image" -k "$WORK/kpimg" -o "$DIST/Image.kp"
+        [[ -s $DIST/Image.kp ]] || fail "kpimg patch failed"
+        mv "$DIST/Image.kp" "$DIST/Image"
+        echo "KPM: kpimg patched, Image=$(stat -c%s "$DIST/Image") bytes"
+    fi
+    sign_boot "$DIST/boot.img" "$WORK/boot.img"
+    local release=$WORK/release
+    local destination=$ROOT/out/$(date -u +%Y%m%dT%H%M%SZ)-$(git -C "$KSU_WORK" rev-parse --short=8 HEAD)
+    [[ ! -e $destination && ! -L $destination ]] || fail "refusing to overwrite $destination"
+    rm -rf -- "$release"
+    mkdir "$release"
+    package_boot "$WORK/boot.img" "$WORK/AnyKernel3" "$release/elden-kernel.zip"
+    cp "$DIST/Image" "$release/Image"
+    cp "$WORK/boot.img" "$release/boot.img"
+    cp "$DIST/kernel_aarch64_dot_config" "$release/kernel.config"
+    "$KERNEL/prebuilts/kernel-build-tools/linux-x86/bin/avbtool" info_image \
+        --image "$release/boot.img" > "$release/avb-info.txt"
+    (
+        for tool in kernel/common susfs AnyKernel3; do
+            printf '%s %s\n' "$tool" "$(git -C "$WORK/$tool" rev-parse HEAD)"
+        done
+        printf 'AnyKernel3-tools %s\n' "$(git -C "$WORK/AnyKernel3" rev-parse refs/remotes/origin/arm64-tools)"
+        printf 'BUILD_NUMBER %s\n' "$BUILD_NUMBER"
+        [ -f "$KERNEL/common/drivers/$KSU_DIR/kernel/elden-version.mk" ] && cat "$KERNEL/common/drivers/$KSU_DIR/kernel/elden-version.mk" || true
+        cd "$ROOT"
+        sha256sum patches/*.patch kernel.fragment boot.conf anykernel.sh build-bakasu-elden.sh
+    ) > "$release/sources.txt"
+    (cd "$KERNEL" && repo manifest -r -o "$release/manifest.xml")
+    (
+        cd "$release"
+        sha256sum Image boot.img elden-kernel.zip kernel.config sources.txt manifest.xml avb-info.txt > SHA256SUMS
+    )
+    mkdir -p "$ROOT/out"
+    mv -T -- "$release" "$destination"
+    printf '\nBuilt: %s\n' "$destination"
+}
+
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+    main "$@"
+fi

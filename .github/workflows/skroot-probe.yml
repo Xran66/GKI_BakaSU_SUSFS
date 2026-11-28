@@ -1,0 +1,44 @@
+# 只验证 kairos/skroot/patch_kernel_root 能不能编译（不编内核，两三分钟出结果）
+name: SKRoot patcher probe
+
+# 顺手带一个 push 触发：workflow 文件在非默认分支上只有跑过一次才会被
+# GitHub 注册进 Actions 列表，之后才能用 workflow_dispatch 手动触发。
+on:
+  push:
+    branches: [kairos-ko-test]
+    paths: [kairos/skroot/**, .github/workflows/skroot-probe.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出
+        uses: actions/checkout@v6
+
+      - name: 编译 patch_kernel_root
+        run: |
+          set -o pipefail
+          make -C kairos/skroot/patch_kernel_root -j"$(nproc)" 2>&1 | tee build.log
+          echo "exit=$?" >> "$GITHUB_OUTPUT"
+
+      - name: 上传日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: skroot-probe-log
+          path: build.log
+
+      - name: 汇总
+        if: always()
+        run: |
+          {
+            echo "### SKRoot probe"
+            echo ""
+            echo '```'
+            grep -n -m 30 -E "error|Error|错误" build.log || echo "(无 error 关键字)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

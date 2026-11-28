@@ -1,0 +1,87 @@
+name: Build Elden kernel (Xran66)
+
+on:
+  workflow_dispatch:
+    inputs:
+      add_lineagehide:
+        description: "应用 Lineage_Hide procfs 清洗补丁（bootloop 嫌疑，默认关）"
+        required: false
+        type: boolean
+        default: false
+      use_susfs_pin:
+        description: "SUSFS 锁定到 2026-10-29 最后提交（防止 11 月上游掉 SELinux）"
+        required: false
+        type: boolean
+        default: true
+      add_propspoof:
+        description: "内建 prop_spoof 模块（bootloop 排查：出纯原版时关掉）"
+        required: false
+        type: boolean
+        default: true
+      add_panicdebug:
+        description: "调试模式：挂死转 panic+10s 热重启，ramoops 抓日志"
+        required: false
+        type: boolean
+        default: false
+      gki_branch:
+        description: "内核 manifest 分支（留空跟 HEAD；填 common-android16-6.12-2026-10 锁回 android16-6 代）"
+        required: false
+        type: string
+        default: ""
+      gki_common_commit:
+        description: "kernel/common 锁定（refs/tags/android16-6.12.96_r00 = gen-6 era；或裸 SHA）"
+        required: false
+        type: string
+        default: ""
+      bakasu_commit:
+        description: "BakaSU 锁定 commit（516d3e87fbc986ccefdde2c2765f1700612441a9 = 10-31 版）"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y repo git python3 zip unzip rsync bc flex bison build-essential libssl-dev libelf-dev zlib1g-dev zstd openssl
+
+      - name: Clone lunatellus elden-kernel build project
+        run: git clone https://github.com/lunatellus/elden-kernel.git build
+
+      - name: Overlay our build script and prop_spoof source
+        if: ${{ inputs.add_propspoof || inputs.add_lineagehide || inputs.use_susfs_pin || inputs.add_panicdebug || inputs.gki_branch != '' || inputs.gki_common_commit != '' || inputs.bakasu_commit != '' }}
+        run: |
+          cp elden/build-elden-ours.sh build/build-bakasu-elden.sh
+          cp elden/prop_spoof.c build/prop_spoof.c
+          chmod 755 build/build-bakasu-elden.sh
+
+      - name: Build AVB-signed boot and AnyKernel3 package
+        env:
+          ADD_PROPSPOOF: ${{ inputs.add_propspoof && '1' || '0' }}
+          ADD_LINEAGEHIDE: ${{ inputs.add_lineagehide && '1' || '0' }}
+          ADD_PANICDEBUG: ${{ inputs.add_panicdebug && '1' || '0' }}
+          GKI_BRANCH: ${{ inputs.gki_branch }}
+          GKI_COMMON_COMMIT: ${{ inputs.gki_common_commit }}
+          BAKASU_COMMIT: ${{ inputs.bakasu_commit }}
+          # 6b60a305 = gki-android16-6.12 分支 2026-10-29 当天最后提交
+          SUSFS_COMMIT: ${{ inputs.use_susfs_pin && '6b60a305d418148bd311f4fc9bddedc82d99e1fc' || '' }}
+        run: |
+          cd build
+          JOBS=8 ./build-bakasu-elden.sh
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: elden-kernel-xran66
+          path: build/out/
+          if-no-files-found: error
