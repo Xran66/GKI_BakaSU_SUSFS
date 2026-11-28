@@ -115,6 +115,7 @@ enum memx_op {
 	KOP_0x920		= 0x920,
 	KOP_0x921		= 0x921,
 	KOP_0x922		= 0x922,
+	KOP_0x923		= 0x923,
 	KOP_GET_VMA_BATCH	= 0x930,
 };
 
@@ -142,6 +143,7 @@ unsigned int memx_gyro_stamp(void);
 long memx_bp_set(void __user *uarg);
 long memx_bp_get(void __user *uarg);
 long memx_bp_clear(void);
+long memx_bp_refresh(void __user *uarg);
 u32  memx_bp_count(void);
 
 /* ---- mem ---- */

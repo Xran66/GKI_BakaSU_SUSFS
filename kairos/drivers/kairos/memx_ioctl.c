@@ -472,6 +472,8 @@ long memx_dispatch(struct file *file, u32 magic, u32 op, void __user *uarg)
 		return memx_bp_get(uarg);
 	case KOP_0x922:		/* clear */
 		return memx_bp_clear();
+	case KOP_0x923:		/* refresh threads */
+		return memx_bp_refresh(uarg);
 
 
 	case KOP_GET_TPIDR:
