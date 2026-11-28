@@ -184,39 +184,52 @@ static void memx_bp_handler(struct perf_event *bp, struct perf_sample_data *data
 	regs->pc += 4;
 }
 
-/* 给 pid 的所有线程装断点；返回本次新装数量 */
+/*
+ * 给 pid 的所有线程装断点；返回本次新装数量。
+ * 分两阶段：先在 RCU 下把线程指针取出来（get_task_struct 保活），
+ * 再在非 RCU 上下文注册 perf 事件（注册会分配内存，不能持 rcu_read_lock）。
+ */
 static int bp_attach_threads(struct memx_bp *nb, struct task_struct *leader)
 {
 	struct perf_event_attr attr;
 	struct task_struct *t;
-	int added = 0;
+	struct task_struct *tmp[MEMX_BP_MAX_INST];
+	int ntmp = 0, i, added = 0;
+
+	rcu_read_lock();
+	for_each_thread(leader, t) {
+		bool dup = false;
+
+		for (i = 0; i < nb->ninst; i++) {
+			if (nb->inst[i].task == t) { dup = true; break; }
+		}
+		for (i = 0; i < ntmp; i++) {
+			if (tmp[i] == t) { dup = true; break; }
+		}
+		if (dup)
+			continue;
+		if (nb->ninst + ntmp >= MEMX_BP_MAX_INST)
+			break;
+		get_task_struct(t);
+		tmp[ntmp++] = t;
+	}
+	rcu_read_unlock();
 
 	hw_breakpoint_init(&attr);
 	attr.bp_addr = nb->addr;
 	attr.bp_len = HW_BREAKPOINT_LEN_4;
 	attr.bp_type = HW_BREAKPOINT_X;
 
-	for_each_thread(leader, t) {
-		bool dup = false;
-		int i;
+	for (i = 0; i < ntmp; i++) {
+		struct perf_event *ev;
 
-		for (i = 0; i < nb->ninst; i++) {
-			if (nb->inst[i].task == t) { dup = true; break; }
-		}
-		if (dup)
-			continue;
-		if (nb->ninst >= MEMX_BP_MAX_INST)
-			break;
-
-		get_task_struct(t);
-		nb->inst[nb->ninst].bp =
-			register_user_hw_breakpoint(&attr, memx_bp_handler, NULL, t);
-		if (IS_ERR(nb->inst[nb->ninst].bp)) {
-			nb->inst[nb->ninst].bp = NULL;
-			put_task_struct(t);
+		ev = register_user_hw_breakpoint(&attr, memx_bp_handler, NULL, tmp[i]);
+		if (IS_ERR(ev)) {
+			put_task_struct(tmp[i]);
 			continue;
 		}
-		nb->inst[nb->ninst].task = t;
+		nb->inst[nb->ninst].task = tmp[i];
+		nb->inst[nb->ninst].bp = ev;
 		nb->ninst++;
 		added++;
 	}
